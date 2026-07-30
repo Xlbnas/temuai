@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}{{ record.project.name }} · Studio{% endblock %}
+{% block content %}
+<p><a href="/studio">← All Studio projects</a></p>
+<h1>{{ record.project.name }}</h1>
+{% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+<section class="card">
+  <h2>1. Bulk archive</h2>
+  <p class="muted">Upload up to 20 JPG, PNG, or WebP assets. Originals are retained separately from previews.</p>
+  <form method="post" action="/studio/{{ record.project.id }}/assets" enctype="multipart/form-data">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input name="files" type="file" accept="image/jpeg,image/png,image/webp" multiple required>
+    <button class="btn primary" type="submit">Archive images</button>
+  </form>
+</section>
+<section class="card">
+  <h2>2. Classification and detail review</h2>
+  <p class="muted">M1 analysis is an explicit offline simulation; it does not perform real vision recognition.</p>
+  {% if record.assets %}<div class="candidate-grid">{% for asset in record.assets %}<article class="candidate-card">
+    <img class="candidate-img" src="/studio/{{ record.project.id }}/assets/{{ asset.id }}/thumbnail" alt="{{ asset.original_filename }}">
+    <p>{{ asset.original_filename }} · {{ asset.width }}×{{ asset.height }}</p>
+    {% set analysis = record.analyses | selectattr('asset_id', 'equalto', asset.id) | list | first %}
+    {% if analysis %}
+      <p><span class="badge">{{ analysis.source_kind.effective_value.value }}</span> <span class="badge">{{ analysis.content_kind.effective_value.value }}</span></p>
+      <form method="post" action="/studio/{{ record.project.id }}/assets/{{ asset.id }}/classification">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <select name="source_kind">{% for v in analysis.source_kind.effective_value.__class__ %}<option value="{{ v.value }}" {% if v == analysis.source_kind.effective_value %}selected{% endif %}>{{ v.value }}</option>{% endfor %}</select>
+        <select name="content_kind">{% for v in analysis.content_kind.effective_value.__class__ %}<option value="{{ v.value }}" {% if v == analysis.content_kind.effective_value %}selected{% endif %}>{{ v.value }}</option>{% endfor %}</select>
+        <input name="detail_types" value="{{ analysis.detail_types.effective_value | join(', ') }}">
+        <button class="btn secondary small">Save correction</button>
+      </form>
+      {% for region in analysis.detail_regions %}<form method="post" action="/studio/{{ record.project.id }}/assets/{{ asset.id }}/regions/{{ region.id }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input name="detail_type" value="{{ region.detail_type.effective_value }}">
+        <select name="importance">{% for v in region.importance.effective_value.__class__ %}<option value="{{ v.value }}" {% if v == region.importance.effective_value %}selected{% endif %}>{{ v.value }}</option>{% endfor %}</select>
+        <input name="label" value="{{ region.label.effective_value }}">
+        <label>x <input name="bbox_x" type="number" min="0" max="1" step="0.01" value="{{ region.normalized_bbox.x if region.normalized_bbox else '' }}"></label>
+        <label>y <input name="bbox_y" type="number" min="0" max="1" step="0.01" value="{{ region.normalized_bbox.y if region.normalized_bbox else '' }}"></label>
+        <label>w <input name="bbox_width" type="number" min="0.01" max="1" step="0.01" value="{{ region.normalized_bbox.width if region.normalized_bbox else '' }}"></label>
+        <label>h <input name="bbox_height" type="number" min="0.01" max="1" step="0.01" value="{{ region.normalized_bbox.height if region.normalized_bbox else '' }}"></label>
+        <label><input type="checkbox" name="confirmed" {% if region.user_confirmed %}checked{% endif %}> Confirmed</label>
+        <button class="btn secondary small">Update detail</button>
+        <button class="btn secondary small" name="delete" value="true">Delete</button>
+      </form>{% endfor %}
+      <form method="post" action="/studio/{{ record.project.id }}/assets/{{ asset.id }}/render"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="btn secondary small">Render annotations</button></form>
+      {% if asset.annotation_path %}<img class="candidate-img" src="/studio/{{ record.project.id }}/assets/{{ asset.id }}/annotation" alt="Human annotation preview (not an image-generation reference)">{% endif %}
+    {% else %}
+      <form method="post" action="/studio/{{ record.project.id }}/assets/{{ asset.id }}/analyze"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="use_mock" value="true"><button class="btn primary small">Analyze (explicit offline mock)</button></form>
+    {% endif %}
+  </article>{% endfor %}</div>{% else %}<p class="muted">No assets archived yet.</p>{% endif %}
+</section>
+<section class="card"><h2>3. Product facts</h2><form method="post" action="/studio/{{ record.project.id }}/spec"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="btn primary">Compile Canonical Product Spec</button></form>{% if record.product_spec %}<ul>{% for fact in record.product_spec.facts %}<li><strong>{{ fact.key }}</strong>: {{ fact.value }} ({{ fact.status }})</li>{% else %}<li class="muted">No confirmed own-capture facts yet.</li>{% endfor %}</ul>{% endif %}</section>
+<section class="card"><h2>4. Style pack and reference bundle</h2><form method="post" action="/studio/{{ record.project.id }}/style"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><select name="style_pack_id">{% for pack in packs %}<option value="{{ pack.id }}" {% if record.project.selected_style_pack_id == pack.id %}selected{% endif %}>{{ pack.platform.value }} · {{ pack.name }} · {{ pack.version }}</option>{% endfor %}</select><button class="btn primary">Select style</button></form>{% if bundle %}<p>Clean product references: {{ bundle.product_asset_ids | length }} · Style references: {{ bundle.style_asset_ids | length }}</p>{% if bundle.detail_board_path %}<img class="candidate-img" src="/studio/{{ record.project.id }}/reference-board" alt="Clean detail reference board (annotation previews are separate)">{% endif %}{% endif %}</section>
+{% endblock %}

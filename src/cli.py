@@ -1,4 +1,5 @@
 """TEMU Image Factory CLI."""
+
 from __future__ import annotations
 
 import json
@@ -6,14 +7,13 @@ import sys
 from pathlib import Path
 
 import click
-import yaml
 
 from src.core.config import AppConfig, get_config
 from src.core.pipeline import Pipeline
-from src.core.provider import GenerateRequest
-from src.providers.registry import create_provider
+from src.studio.analyzers import MockAssetAnalyzer
+from src.studio.models import StudioPlatform
+from src.studio.service import StudioService
 from src.utils.paths import sku_output_path
-from src.utils.secrets import mask_string
 
 
 @click.group()
@@ -100,7 +100,9 @@ def generate(
 
         router = TaskRouter(config)
         task_category = task
-        model_cfg = router.get_model_config(model) if model else router.model_chain(task_category)[0]
+        model_cfg = (
+            router.get_model_config(model) if model else router.model_chain(task_category)[0]
+        )
         estimated = model_cfg.estimated_cost_usd * count
         guard = pipeline.guard
         check = guard.check_task_budget(sku, platform, task, estimated)
@@ -138,6 +140,85 @@ def accept(ctx: click.Context, sku: str, task: str, candidate: int, platform: st
     except Exception as e:
         click.echo(f"Accept failed: {e}", err=True)
         sys.exit(1)
+
+
+@cli.group()
+def studio() -> None:
+    """Product Image Studio commands (always offline in M1)."""
+
+
+@studio.command("create")
+@click.argument("name")
+@click.option("--platform", type=click.Choice(["temu", "tiktok_shop"]), default="temu")
+@click.pass_context
+def studio_create(ctx: click.Context, name: str, platform: str) -> None:
+    project = StudioService(ctx.obj["config"]).create_project(name, StudioPlatform(platform))
+    click.echo(project.id)
+
+
+@studio.command("import")
+@click.argument("project_id")
+@click.argument("images", nargs=-1, type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.pass_context
+def studio_import(ctx: click.Context, project_id: str, images: tuple[Path, ...]) -> None:
+    """Archive images in a Studio project; duplicate SHA-256s are skipped."""
+    if not images or len(images) > 20:
+        raise click.UsageError("Provide between 1 and 20 image files")
+    service = StudioService(ctx.obj["config"])
+    max_bytes = int(ctx.obj["config"].safe_env("MAX_UPLOAD_MB", "30") or "30") * 1024 * 1024
+    for image in images:
+        asset, duplicate = service.import_asset(
+            project_id, image.name, image.read_bytes(), max_bytes
+        )
+        click.echo(
+            f"{'duplicate' if duplicate else 'imported'} {asset.id} {asset.original_filename}"
+        )
+
+
+@studio.command("analyze")
+@click.argument("project_id")
+@click.argument("asset_id")
+@click.option("--mock", "use_mock", is_flag=True, help="Run the explicit offline M1 mock.")
+@click.pass_context
+def studio_analyze(
+    ctx: click.Context, project_id: str, asset_id: str, use_mock: bool
+) -> None:
+    if not use_mock:
+        raise click.UsageError("M1 has no production analyzer; pass --mock for offline simulation")
+    analysis = StudioService(ctx.obj["config"]).analyze_asset(
+        project_id, asset_id, analyzer=MockAssetAnalyzer()
+    )
+    click.echo(analysis.model_dump_json(indent=2))
+
+
+@studio.command("render-annotations")
+@click.argument("project_id")
+@click.argument("asset_id")
+@click.pass_context
+def studio_render_annotations(ctx: click.Context, project_id: str, asset_id: str) -> None:
+    config: AppConfig = ctx.obj["config"]
+    path = StudioService(config).render_annotations(project_id, asset_id)
+    click.echo(path.relative_to(config.data_dir))
+
+
+@studio.command("compile-spec")
+@click.argument("project_id")
+@click.pass_context
+def studio_compile_spec(ctx: click.Context, project_id: str) -> None:
+    click.echo(
+        StudioService(ctx.obj["config"]).compile_product_spec(project_id).model_dump_json(indent=2)
+    )
+
+
+@studio.command("compile-bundle")
+@click.argument("project_id")
+@click.pass_context
+def studio_compile_bundle(ctx: click.Context, project_id: str) -> None:
+    click.echo(
+        StudioService(ctx.obj["config"])
+        .compile_reference_bundle(project_id)
+        .model_dump_json(indent=2)
+    )
 
 
 @cli.group()

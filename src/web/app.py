@@ -12,7 +12,7 @@ from fastapi.templating import Jinja2Templates
 from src.core.config import AppConfig, get_config
 from src.utils.secrets import mask_message
 from src.web.auth import add_session_middleware, get_current_username
-from src.web.routes import api, pages, upload
+from src.web.routes import api, pages, studio, upload
 
 
 def create_app(config: AppConfig | None = None) -> FastAPI:
@@ -34,6 +34,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.include_router(pages.router)
     app.include_router(api.router, prefix="/api")
     app.include_router(upload.router, prefix="/api/upload")
+    app.include_router(studio.router)
 
     @app.get("/health")
     async def health() -> dict[str, str]:
@@ -45,6 +46,10 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             status_code=500,
             content={"detail": mask_message(str(exc))},
         )
+
+    @app.exception_handler(KeyError)
+    async def key_error_handler(request: Request, exc: KeyError) -> JSONResponse:
+        return JSONResponse(status_code=404, content={"detail": "Resource not found"})
 
     return app
 
