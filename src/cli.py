@@ -221,6 +221,146 @@ def studio_compile_bundle(ctx: click.Context, project_id: str) -> None:
     )
 
 
+@studio.command("compile-plan")
+@click.argument("project_id")
+@click.pass_context
+def studio_compile_plan(ctx: click.Context, project_id: str) -> None:
+    """Create the platform's default five-shot M2 plan."""
+    plan = StudioService(ctx.obj["config"]).compile_shot_plan(project_id)
+    click.echo(plan.model_dump_json(indent=2))
+
+
+@studio.command("show-plan")
+@click.argument("project_id")
+@click.argument("plan_id")
+@click.pass_context
+def studio_show_plan(ctx: click.Context, project_id: str, plan_id: str) -> None:
+    record = StudioService(ctx.obj["config"]).get_record(project_id)
+    plan = next((item for item in record.shot_plans if item.id == plan_id), None)
+    if plan is None:
+        raise click.ClickException("Shot Plan not found")
+    click.echo(plan.model_dump_json(indent=2))
+
+
+@studio.command("confirm-plan")
+@click.argument("project_id")
+@click.argument("plan_id")
+@click.option("--by", default="cli", show_default=True)
+@click.pass_context
+def studio_confirm_plan(ctx: click.Context, project_id: str, plan_id: str, by: str) -> None:
+    plan = StudioService(ctx.obj["config"]).confirm_shot_plan(project_id, plan_id, by)
+    click.echo(plan.status.value)
+
+
+@studio.command("compile-prompts")
+@click.argument("project_id")
+@click.argument("plan_id")
+@click.pass_context
+def studio_compile_prompts(ctx: click.Context, project_id: str, plan_id: str) -> None:
+    packages = StudioService(ctx.obj["config"]).compile_prompt_packages(project_id, plan_id)
+    click.echo(json.dumps([item.model_dump(mode="json") for item in packages], indent=2))
+
+
+@studio.command("cost-preview")
+@click.argument("project_id")
+@click.argument("plan_id")
+@click.pass_context
+def studio_cost_preview(ctx: click.Context, project_id: str, plan_id: str) -> None:
+    record = StudioService(ctx.obj["config"]).get_record(project_id)
+    plan = next((item for item in record.shot_plans if item.id == plan_id), None)
+    if plan is None:
+        raise click.ClickException("Shot Plan not found")
+    click.echo(json.dumps({"provider": "mock", "pricing_version": "mock-0", "per_shot": 0, "total": 0, "enabled_shots": sum(s.enabled for s in plan.shots)}, indent=2))
+
+
+@studio.command("generate-mock")
+@click.argument("project_id")
+@click.argument("plan_id")
+@click.option("--shot-id", default=None, help="Generate only one enabled shot.")
+@click.option("--fail-shot-id", default=None, help="Offline test hook: mark one shot failed.")
+@click.pass_context
+def studio_generate_mock(
+    ctx: click.Context, project_id: str, plan_id: str, shot_id: str | None, fail_shot_id: str | None
+) -> None:
+    service = StudioService(ctx.obj["config"])
+    job = service.create_generation_job(project_id, plan_id, shot_id=shot_id)
+    click.echo(service.run_generation_job(project_id, job.id, fail_shot_id).model_dump_json(indent=2))
+
+
+@studio.command("generate-live")
+@click.argument("project_id")
+@click.argument("plan_id")
+@click.option("--mode", type=click.Choice(["live"]), required=True)
+@click.option("--provider", type=click.Choice(["apiyi"]), required=True)
+@click.option("--max-cost", type=float, required=True)
+@click.option("--confirm-paid-generation", is_flag=True, required=True)
+@click.pass_context
+def studio_generate_live(
+    ctx: click.Context,
+    project_id: str,
+    plan_id: str,
+    mode: str,
+    provider: str,
+    max_cost: float,
+    confirm_paid_generation: bool,
+) -> None:
+    """Reserved paid interface; M2A safely rejects unverified APIYI Studio calls."""
+    if max_cost < 0:
+        raise click.UsageError("--max-cost must be non-negative")
+    from src.studio.models import BudgetPolicy
+
+    service = StudioService(ctx.obj["config"])
+    try:
+        service.create_generation_job(
+            project_id,
+            plan_id,
+            mode=mode,
+            provider=provider,
+            budget_policy=BudgetPolicy(project_limit=max_cost, job_limit=max_cost, shot_limit=max_cost),
+            paid_confirmation=confirm_paid_generation,
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@studio.command("show-job")
+@click.argument("project_id")
+@click.argument("job_id")
+@click.pass_context
+def studio_show_job(ctx: click.Context, project_id: str, job_id: str) -> None:
+    record = StudioService(ctx.obj["config"]).get_record(project_id)
+    job = next((item for item in record.generation_jobs if item.id == job_id), None)
+    if job is None:
+        raise click.ClickException("Generation Job not found")
+    attempts = [item for item in record.generation_attempts if item.job_id == job_id]
+    click.echo(json.dumps({"job": job.model_dump(mode="json"), "attempts": [item.model_dump(mode="json") for item in attempts]}, indent=2))
+
+
+@studio.command("list-candidates")
+@click.argument("project_id")
+@click.pass_context
+def studio_list_candidates(ctx: click.Context, project_id: str) -> None:
+    record = StudioService(ctx.obj["config"]).get_record(project_id)
+    click.echo(json.dumps([item.model_dump(mode="json") for item in record.candidates], indent=2))
+
+
+@studio.command("accept-candidate")
+@click.argument("project_id")
+@click.argument("candidate_id")
+@click.pass_context
+def studio_accept_candidate(ctx: click.Context, project_id: str, candidate_id: str) -> None:
+    click.echo(StudioService(ctx.obj["config"]).accept_candidate(project_id, candidate_id).status.value)
+
+
+@studio.command("reject-candidate")
+@click.argument("project_id")
+@click.argument("candidate_id")
+@click.option("--reason", required=True)
+@click.pass_context
+def studio_reject_candidate(ctx: click.Context, project_id: str, candidate_id: str, reason: str) -> None:
+    click.echo(StudioService(ctx.obj["config"]).reject_candidate(project_id, candidate_id, reason).status.value)
+
+
 @cli.group()
 def auth() -> None:
     """Authentication utilities."""

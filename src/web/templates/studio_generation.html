@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Generation · {{ record.project.name }}{% endblock %}
+{% block content %}
+<p><a href="/studio/{{ record.project.id }}">← Studio project</a></p>
+<h1>Product Image Studio — Generation</h1>
+<p class="muted">Mock generation is offline and visibly watermarked. Live generation is disabled by default and is not available in M2A.</p>
+{% if not record.shot_plans %}
+<section class="card"><h2>1. Shot Plan</h2><form method="post" action="/studio/{{ record.project.id }}/plans"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="btn primary">Compile default {{ record.project.target_platform.value }} 5-shot plan</button></form></section>
+{% endif %}
+{% for plan in record.shot_plans | reverse %}
+<section class="card">
+  <h2>Shot Plan {{ plan.version }} · <span class="badge">{{ plan.status.value }}</span></h2>
+  <p class="muted">Hash: {{ plan.content_hash[:16] }} · Style: {{ plan.style_pack_id }} {{ plan.style_pack_version }}</p>
+  {% if plan.blocking_reasons %}<ul class="alert error">{% for reason in plan.blocking_reasons %}<li>{{ reason }}</li>{% endfor %}</ul>{% endif %}
+  {% for shot in plan.shots | sort(attribute='sequence') %}
+  <form class="card" method="post" action="/studio/{{ record.project.id }}/plans/{{ plan.id }}/shots/{{ shot.id }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <strong>{{ shot.title }}</strong> <span class="muted">{{ shot.shot_type }} · {{ shot.width }}×{{ shot.height }}</span>
+    <label>Order <input name="sequence" type="number" min="1" value="{{ shot.sequence }}"></label>
+    <label>Composition <input name="composition" value="{{ shot.composition }}"></label>
+    <label>Instruction <input name="user_instruction" value="{{ shot.user_instruction }}"></label>
+    <label><input name="enabled" type="checkbox" {% if shot.enabled %}checked{% endif %}> Enabled</label>
+    {% if plan.status.value == 'draft' %}<button class="btn secondary small">Save shot</button>{% endif %}
+  </form>
+  {% endfor %}
+  {% if plan.status.value == 'draft' %}
+  <form method="post" action="/studio/{{ record.project.id }}/plans/{{ plan.id }}/prompts"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="btn secondary">Compile Prompt Packages</button></form>
+  <form method="post" action="/studio/{{ record.project.id }}/plans/{{ plan.id }}/confirm"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="btn primary">Confirm plan</button></form>
+  {% elif plan.status.value == 'confirmed' %}
+  <p><strong>Cost preview:</strong> Mock · $0 per shot · $0 total · pricing mock-0</p>
+  <form method="post" action="/studio/{{ record.project.id }}/plans/{{ plan.id }}/generate/mock"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="btn primary">Generate enabled shots with Mock (free)</button></form>
+  {% endif %}
+</section>
+{% endfor %}
+
+{% if record.prompt_packages %}<section class="card"><h2>Prompt Preview</h2>{% for package in record.prompt_packages %}<details><summary>{{ package.shot_id }} · {{ package.compiler_version }} · {{ package.content_hash[:16] }}{% if package.stale %} (stale){% endif %}</summary><p><strong>Facts:</strong> {{ package.structured_product_facts }}</p><p><strong>Provider references:</strong> product {{ package.product_reference_ids }}, detail {{ package.detail_reference_ids }}, style {{ package.style_reference_ids }}</p><p class="muted">Annotation previews are display-only: {{ package.annotation_preview_ids }}</p><pre>{{ package.rendered_prompt }}</pre><pre>{{ package.negative_prompt }}</pre></details>{% endfor %}</section>{% endif %}
+
+{% if record.generation_jobs %}<section class="card"><h2>Generation Jobs</h2><ul>{% for job in record.generation_jobs | reverse %}<li>{{ job.id[:12] }} · {{ job.status.value }} · {{ job.mode }} · estimated {{ job.estimated_total_cost if job.estimated_total_cost is not none else 'unknown' }}</li>{% endfor %}</ul></section>{% endif %}
+{% if record.candidates %}<section class="card"><h2>Candidate Gallery</h2><div class="candidate-grid">{% for candidate in record.candidates %}<article class="candidate-card"><img class="candidate-img" src="/studio/{{ record.project.id }}/candidates/{{ candidate.id }}/image" alt="Mock generation candidate"><p>{{ candidate.shot_id }} · {{ candidate.status.value }}</p><p class="muted">Attempt {{ candidate.attempt_id[:12] }} · {{ candidate.width }}×{{ candidate.height }} · $0</p>{% if candidate.status.value == 'generated' %}<form method="post" action="/studio/{{ record.project.id }}/candidates/{{ candidate.id }}/accept"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="btn primary small">Accept</button></form><form method="post" action="/studio/{{ record.project.id }}/candidates/{{ candidate.id }}/reject"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input name="reason" required placeholder="Rejection reason"><button class="btn secondary small">Reject</button></form>{% endif %}</article>{% endfor %}</div></section>{% endif %}
+{% endblock %}
