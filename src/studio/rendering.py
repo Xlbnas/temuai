@@ -4,22 +4,24 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from src.studio.models import Asset, DetailRegion
 
 
 def _font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-    try:
-        return ImageFont.truetype("DejaVuSans-Bold.ttf", size)
-    except OSError:
-        return ImageFont.load_default()
+    for font_name in ("NotoSansCJK-Bold.ttc", "DejaVuSans-Bold.ttf"):
+        try:
+            return ImageFont.truetype(font_name, size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
 
 
 def render_annotations(source: Path, destination: Path, regions: list[DetailRegion]) -> Path:
     """Render red callouts without ever modifying the uploaded original."""
     with Image.open(source) as opened:
-        image = opened.convert("RGB")
+        image = ImageOps.exif_transpose(opened).convert("RGB")
     draw = ImageDraw.Draw(image)
     width, height = image.size
     font = _font(max(12, min(width, height) // 28))
@@ -63,7 +65,7 @@ def render_detail_board(items: list[tuple[Asset, Path]], destination: Path) -> P
     font = _font(20)
     for index, (asset, path) in enumerate(items, start=1):
         with Image.open(path) as opened:
-            image = opened.convert("RGB")
+            image = ImageOps.exif_transpose(opened).convert("RGB")
         image.thumbnail((cell_w - 24, cell_h - 60))
         x = ((index - 1) % 2) * cell_w + (cell_w - image.width) // 2
         y = ((index - 1) // 2) * cell_h + 32

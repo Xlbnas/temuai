@@ -7,7 +7,8 @@ from typing import Annotated, Any, cast
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
-from src.studio.models import ContentKind, Importance, SourceKind, StudioPlatform
+from src.studio.analyzers import MockAssetAnalyzer
+from src.studio.models import ContentKind, Importance, NormalizedBBox, SourceKind, StudioPlatform
 from src.studio.service import StudioService
 from src.web.auth import generate_csrf_token, get_current_username, validate_csrf_token
 
@@ -73,7 +74,7 @@ async def project_detail(
         "studio_project.html",
         record=record,
         bundle=bundle,
-        packs=_service(request).style_packs(),
+        packs=_service(request).style_packs(record.project.target_platform),
         user=username,
         error=None,
     )
@@ -102,7 +103,7 @@ async def import_assets(
             "studio_project.html",
             record=record,
             bundle=None,
-            packs=service.style_packs(),
+            packs=service.style_packs(record.project.target_platform),
             user=username,
             error=str(exc),
         )
@@ -114,11 +115,14 @@ async def analyze(
     request: Request,
     project_id: str,
     asset_id: str,
+    use_mock: Annotated[bool, Form()] = False,
     csrf_token: str = Form(...),
     username: str = Depends(get_current_username),
 ) -> RedirectResponse:
     validate_csrf_token(request, csrf_token)
-    _service(request).analyze_asset(project_id, asset_id)
+    if not use_mock:
+        raise HTTPException(status_code=400, detail="M1 analysis requires explicit offline mock mode")
+    _service(request).analyze_asset(project_id, asset_id, analyzer=MockAssetAnalyzer())
     return RedirectResponse(f"/studio/{project_id}", status_code=status.HTTP_303_SEE_OTHER)
 
 
@@ -149,12 +153,27 @@ async def update_region(
     detail_type: str = Form(...),
     importance: Importance = Form(...),  # noqa: B008
     label: str = Form(...),
+    bbox_x: float | None = Form(None),
+    bbox_y: float | None = Form(None),
+    bbox_width: float | None = Form(None),
+    bbox_height: float | None = Form(None),
     confirmed: Annotated[bool, Form()] = False,
     delete: Annotated[bool, Form()] = False,
     csrf_token: str = Form(...),
     username: str = Depends(get_current_username),
 ) -> RedirectResponse:
     validate_csrf_token(request, csrf_token)
+    bbox_values = (bbox_x, bbox_y, bbox_width, bbox_height)
+    if any(value is not None for value in bbox_values) and any(value is None for value in bbox_values):
+        raise HTTPException(status_code=400, detail="Provide all four normalized bbox values")
+    bbox = None
+    if all(value is not None for value in bbox_values):
+        bbox = NormalizedBBox(
+            x=cast(float, bbox_x),
+            y=cast(float, bbox_y),
+            width=cast(float, bbox_width),
+            height=cast(float, bbox_height),
+        )
     _service(request).update_region(
         project_id,
         asset_id,
@@ -163,6 +182,7 @@ async def update_region(
         importance=importance,
         label=label,
         confirmed=confirmed,
+        bbox=bbox,
         delete=delete,
     )
     return RedirectResponse(f"/studio/{project_id}", status_code=status.HTTP_303_SEE_OTHER)

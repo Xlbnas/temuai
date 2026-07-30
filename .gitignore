@@ -18,6 +18,7 @@ venv/
 .tox/
 
 # 运行时数据（不要提交真实图片或日志）
+data/
 cache/
 output/
 logs/

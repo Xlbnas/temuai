@@ -51,6 +51,15 @@ class StudioPlatform(str, Enum):
     TIKTOK_SHOP = "tiktok_shop"
 
 
+class ReferenceRole(str, Enum):
+    PRODUCT_REFERENCE_CLEAN = "product_reference_clean"
+    DETAIL_REFERENCE_CLEAN = "detail_reference_clean"
+    HUMAN_ANNOTATION_PREVIEW = "human_annotation_preview"
+    STYLE_REFERENCE = "style_reference"
+    CANONICAL_PRODUCT_SPEC = "canonical_product_spec"
+    STYLE_PACK = "style_pack"
+
+
 T = TypeVar("T")
 
 
@@ -76,6 +85,7 @@ class StudioProject(BaseModel):
     updated_at: str = Field(default_factory=utc_now)
     target_platform: StudioPlatform = StudioPlatform.TEMU
     selected_style_pack_id: str | None = None
+    selected_style_pack: StylePack | None = None
 
 
 class Asset(BaseModel):
@@ -143,6 +153,7 @@ class AssetAnalysis(BaseModel):
     visual_facts: list[str] = Field(default_factory=list)
     analyzer_name: str
     analyzer_version: str
+    config_version: str
     schema_version: str
     source_image_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     analyzed_at: str = Field(default_factory=utc_now)
@@ -192,7 +203,17 @@ class ReferenceBundle(BaseModel):
     detail_board_path: str | None = None
     product_spec: CanonicalProductSpec
     style_pack: StylePack | None = None
+    references: list[ReferenceItem] = Field(default_factory=list)
     compiled_at: str = Field(default_factory=utc_now)
+
+
+class ReferenceItem(BaseModel):
+    """A role-labelled item so future image providers cannot mix visual inputs."""
+
+    model_config = ConfigDict(extra="forbid")
+    role: ReferenceRole
+    asset_id: str | None = None
+    relative_path: str | None = None
 
 
 class StudioRecord(BaseModel):

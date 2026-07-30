@@ -47,6 +47,10 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             content={"detail": mask_message(str(exc))},
         )
 
+    @app.exception_handler(KeyError)
+    async def key_error_handler(request: Request, exc: KeyError) -> JSONResponse:
+        return JSONResponse(status_code=404, content={"detail": "Resource not found"})
+
     return app
 
 

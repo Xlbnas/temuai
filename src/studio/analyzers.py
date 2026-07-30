@@ -24,6 +24,7 @@ class AnalyzerNotConfigured(RuntimeError):
 class AssetAnalyzer(ABC):
     name: str
     version: str
+    config_version: str = "1"
 
     @abstractmethod
     def analyze(self, image_path: Path, asset: Asset, schema_version: str) -> AssetAnalysis: ...
@@ -34,6 +35,7 @@ class MockAssetAnalyzer(AssetAnalyzer):
 
     name = "mock"
     version = "1.0.0"
+    config_version = "m1-offline-1"
 
     def __init__(self, configured: dict[str, AssetAnalysis] | None = None) -> None:
         self.configured = configured or {}
@@ -44,14 +46,9 @@ class MockAssetAnalyzer(AssetAnalyzer):
             result.asset_id = asset.id
             result.source_image_sha256 = asset.sha256
             return result
-        name = asset.original_filename.lower()
-        content = (
-            ContentKind.PRODUCT_FULL_FRONT
-            if "front" in name
-            else ContentKind.DETAIL
-            if "detail" in name
-            else ContentKind.UNKNOWN
-        )
+        # Do not use caller-controlled filenames as mock input.  M1 deliberately
+        # produces a predictable reviewable result, not a claim of visual inference.
+        content = ContentKind.DETAIL
         regions: list[DetailRegion] = []
         if content == ContentKind.DETAIL:
             regions.append(
@@ -77,6 +74,7 @@ class MockAssetAnalyzer(AssetAnalyzer):
             visual_facts=["Imported asset requires human confirmation"],
             analyzer_name=self.name,
             analyzer_version=self.version,
+            config_version=self.config_version,
             schema_version=schema_version,
             source_image_sha256=asset.sha256,
         )
@@ -87,6 +85,7 @@ class NotConfiguredAssetAnalyzer(AssetAnalyzer):
 
     name = "not_configured"
     version = "0"
+    config_version = "0"
 
     def analyze(self, image_path: Path, asset: Asset, schema_version: str) -> AssetAnalysis:
         raise AnalyzerNotConfigured(

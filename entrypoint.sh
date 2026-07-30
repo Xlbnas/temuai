@@ -18,11 +18,17 @@ INPUT_DIR=${INPUT_DIR:-/app/input}
 OUTPUT_DIR=${OUTPUT_DIR:-/app/output}
 CACHE_DIR=${CACHE_DIR:-/app/cache}
 LOGS_DIR=${LOGS_DIR:-/app/logs}
+INPUT_DEFAULTS_DIR=${INPUT_DEFAULTS_DIR:-/app/input-defaults}
 
 run_init() {
     # Ensure persistent directories exist
     mkdir -p "$CONFIG_DIR" "$TEMPLATE_DIR" "$DATA_DIR" \
         "$INPUT_DIR" "$OUTPUT_DIR" "$CACHE_DIR" "$LOGS_DIR"
+    # Seed the bundled sample SKU only on an empty first-run input volume.
+    # Existing operator input is never replaced.
+    if [ -d "$INPUT_DEFAULTS_DIR" ] && [ -z "$(ls -A "$INPUT_DIR")" ]; then
+        cp -a "$INPUT_DEFAULTS_DIR"/. "$INPUT_DIR"/
+    fi
     # Seed missing default configs/templates (idempotent, never overwrites)
     python -m src.utils.bootstrap
 }

@@ -13,8 +13,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml ./
+COPY src ./src
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -e .
+    pip install --no-cache-dir .
 
 # ---------------- runtime stage ----------------
 FROM python:3.12-slim
@@ -33,6 +34,7 @@ WORKDIR $APP_HOME
 # Install runtime dependencies: DejaVu fonts for Pillow text rendering, gosu for privilege drop
 RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-dejavu-core \
+    fonts-noto-cjk \
     libfreetype6 \
     libjpeg62-turbo \
     libpng16-16 \
@@ -56,7 +58,7 @@ COPY pyproject.toml ./
 # host volume mounts never hide them; the entrypoint seeds missing files only.
 COPY config ./config-defaults
 COPY templates ./templates-defaults
-COPY input ./input
+COPY input ./input-defaults
 
 # Copy entrypoint
 COPY entrypoint.sh /entrypoint.sh

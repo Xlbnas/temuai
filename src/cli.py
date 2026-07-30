@@ -10,6 +10,7 @@ import click
 
 from src.core.config import AppConfig, get_config
 from src.core.pipeline import Pipeline
+from src.studio.analyzers import MockAssetAnalyzer
 from src.studio.models import StudioPlatform
 from src.studio.service import StudioService
 from src.utils.paths import sku_output_path
@@ -177,9 +178,16 @@ def studio_import(ctx: click.Context, project_id: str, images: tuple[Path, ...])
 @studio.command("analyze")
 @click.argument("project_id")
 @click.argument("asset_id")
+@click.option("--mock", "use_mock", is_flag=True, help="Run the explicit offline M1 mock.")
 @click.pass_context
-def studio_analyze(ctx: click.Context, project_id: str, asset_id: str) -> None:
-    analysis = StudioService(ctx.obj["config"]).analyze_asset(project_id, asset_id)
+def studio_analyze(
+    ctx: click.Context, project_id: str, asset_id: str, use_mock: bool
+) -> None:
+    if not use_mock:
+        raise click.UsageError("M1 has no production analyzer; pass --mock for offline simulation")
+    analysis = StudioService(ctx.obj["config"]).analyze_asset(
+        project_id, asset_id, analyzer=MockAssetAnalyzer()
+    )
     click.echo(analysis.model_dump_json(indent=2))
 
 
@@ -188,8 +196,9 @@ def studio_analyze(ctx: click.Context, project_id: str, asset_id: str) -> None:
 @click.argument("asset_id")
 @click.pass_context
 def studio_render_annotations(ctx: click.Context, project_id: str, asset_id: str) -> None:
-    path = StudioService(ctx.obj["config"]).render_annotations(project_id, asset_id)
-    click.echo(path)
+    config: AppConfig = ctx.obj["config"]
+    path = StudioService(config).render_annotations(project_id, asset_id)
+    click.echo(path.relative_to(config.data_dir))
 
 
 @studio.command("compile-spec")
