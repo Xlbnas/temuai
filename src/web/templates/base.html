@@ -13,6 +13,7 @@
             <a href="/" class="brand">TEMU Image Factory</a>
             {% if user %}
             <nav>
+                <a href="/studio">Image Studio</a>
                 <span class="user">{{ user }}</span>
                 <form action="/logout" method="post" class="inline">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">

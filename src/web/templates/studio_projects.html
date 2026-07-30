@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}Product Image Studio{% endblock %}
+{% block content %}
+<h1>Product Image Studio</h1>
+{% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+<section class="card narrow"><h2>New project</h2>
+<form method="post" action="/studio/projects"><input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+<label>Name <input name="name" required maxlength="200"></label>
+<label>Platform <select name="target_platform"><option value="temu">TEMU</option><option value="tiktok_shop">TikTok Shop</option></select></label>
+<button class="btn primary" type="submit">Create project</button></form></section>
+<section class="card"><h2>Projects</h2>{% if projects %}<table class="sku-table"><tr><th>Name</th><th>Platform</th><th>Status</th><th></th></tr>{% for project in projects %}<tr><td>{{ project.name }}</td><td>{{ project.target_platform.value }}</td><td>{{ project.status }}</td><td><a class="btn secondary small" href="/studio/{{ project.id }}">Open</a></td></tr>{% endfor %}</table>{% else %}<p class="muted">No Studio projects yet. Create one to archive product assets.</p>{% endif %}</section>
+{% endblock %}
