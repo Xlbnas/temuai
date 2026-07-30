@@ -1,0 +1,41 @@
+.env
+.env.local
+*.pyc
+__pycache__/
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+
+# 运行时数据（不要提交真实图片或日志）
+cache/
+output/
+logs/
+data/cache/
+data/output/
+data/logs/
+data/input/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 测试生成
+.coverage
+htmlcov/

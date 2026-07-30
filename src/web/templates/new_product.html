@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}New Product - TEMU Image Factory{% endblock %}
+{% block content %}
+<h1>New Product</h1>
+<div class="card narrow">
+    <form action="/api/upload/new-product" method="post" enctype="multipart/form-data">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <label for="sku">SKU</label>
+        <input type="text" id="sku" name="sku" required pattern="[A-Za-z0-9_\-]+" title="Alphanumeric, underscore, hyphen">
+        <label for="category">Product Category</label>
+        <input type="text" id="category" name="category" required>
+        <label for="color">Color</label>
+        <input type="text" id="color" name="color" required>
+        <label for="fabric_name">Fabric Name</label>
+        <input type="text" id="fabric_name" name="fabric_name" required>
+        <label for="front">Front Image</label>
+        <input type="file" id="front" name="front" accept="image/jpeg,image/png,image/webp">
+        <label for="back">Back Image</label>
+        <input type="file" id="back" name="back" accept="image/jpeg,image/png,image/webp">
+        <label for="pocket">Pocket Detail</label>
+        <input type="file" id="pocket" name="pocket" accept="image/jpeg,image/png,image/webp">
+        <label for="fabric">Fabric Detail</label>
+        <input type="file" id="fabric" name="fabric" accept="image/jpeg,image/png,image/webp">
+        <button type="submit" class="btn primary">Create SKU</button>
+    </form>
+</div>
+{% endblock %}

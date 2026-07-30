@@ -1,0 +1,15 @@
+name: lifestyle_final
+version: "1.0.0"
+base: |
+  Lifestyle product photo of a {{ ethnicity }} person wearing a {{ color }} {{ category }} in a casual outdoor daily setting.
+  Natural lighting, authentic moment, not a studio.
+  The garment is the hero of the image.
+  {{ scene }}
+  
+  Garment preservation rules:
+  {{ preservation_rules }}
+  
+  Avoid:
+  {{ avoid_rules }}
+  
+  Do not add any text, logo, watermark, or graphic overlay.

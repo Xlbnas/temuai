@@ -1,0 +1,72 @@
+# TEMU Image Factory - 任务路由配置
+# 声明任务类型 -> 候选模型列表（priority 顺序）
+# 生产模型限定: gpt_image_2_vip / nano_banana_2 / gpt_image_2
+
+routes:
+  # draft 类任务：优先 Nano Banana 2 Lite（仅 1K），受限 fallback 到 vip
+  draft:
+    primary: nano_banana_lite
+    fallback:
+      - gpt_image_2_vip
+  concept:
+    primary: nano_banana_lite
+    fallback:
+      - gpt_image_2_vip
+  background_draft:
+    primary: nano_banana_lite
+    fallback:
+      - gpt_image_2_vip
+  lifestyle_draft:
+    primary: nano_banana_lite
+    fallback:
+      - gpt_image_2_vip
+  bulk_candidate:
+    primary: nano_banana_lite
+    fallback:
+      - gpt_image_2_vip
+
+  # 正式生产任务：优先 Nano Banana 2
+  model_front:
+    primary: nano_banana_2
+    fallback:
+      - gpt_image_2_vip
+  model_back:
+    primary: nano_banana_2
+    fallback:
+      - gpt_image_2_vip
+  model_half:
+    primary: nano_banana_2
+    fallback:
+      - gpt_image_2_vip
+  product_scene:
+    primary: nano_banana_2
+  lifestyle_final:
+    primary: nano_banana_2
+    fallback:
+      - gpt_image_2_vip
+  multi_reference_edit:
+    primary: nano_banana_2
+
+  # 高端/困难任务：Nano Banana 2 -> gpt_image_2
+  premium_final:
+    primary: nano_banana_2
+    fallback:
+      - gpt_image_2
+  difficult_edit:
+    primary: nano_banana_2
+    fallback:
+      - gpt_image_2
+
+  # 精确尺寸：使用 gpt_image_2_vip
+  exact_size_generation:
+    primary: gpt_image_2_vip
+
+  # Mask inpaint：使用 gpt_image_2
+  masked_inpaint:
+    primary: gpt_image_2
+
+# 全局 fallback 默认策略
+global_fallback:
+  enabled: true
+  max_attempts: 3
+  max_cost_usd: 0.30

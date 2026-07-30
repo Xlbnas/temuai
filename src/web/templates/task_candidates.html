@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}{{ sku }} / {{ task_id }} - TEMU Image Factory{% endblock %}
+{% block content %}
+<h1>{{ sku }} / {{ task_id }}</h1>
+<p><a href="/products/{{ sku }}" class="btn small secondary">&larr; Back to SKU</a></p>
+
+{% if task %}
+<section class="card">
+    <h2>Candidates <span class="badge {{ task.status }}">{{ task.status }}</span></h2>
+    <p class="muted">
+        Model: {{ task.model or "—" }} | Provider: {{ task.provider or "—" }} |
+        Est. cost: ${{ "%.3f"|format(task.estimated_cost_usd) }}
+    </p>
+    {% if candidates %}
+    <div class="candidate-grid">
+        {% for c in candidates %}
+        <div class="candidate-card">
+            <div class="candidate-head">
+                <strong>Candidate {{ c.index }}</strong>
+                {% if c.status == "accepted" %}
+                <span class="badge accepted">Accepted (current final)</span>
+                {% elif c.status == "rejected" %}
+                <span class="badge rejected">Rejected</span>
+                {% else %}
+                <span class="badge pending">Pending</span>
+                {% endif %}
+            </div>
+            <a href="{{ c.url }}" target="_blank">
+                <img src="{{ c.url }}" alt="Candidate {{ c.index }}" class="candidate-img">
+            </a>
+            <div class="candidate-actions">
+                {% if c.status != "accepted" %}
+                <form action="/api/accept" method="post" class="inline">
+                    <input type="hidden" name="sku" value="{{ sku }}">
+                    <input type="hidden" name="task" value="{{ task_id }}">
+                    <input type="hidden" name="candidate" value="{{ c.index }}">
+                    <input type="hidden" name="platform" value="temu">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <button type="submit" class="btn small">Accept</button>
+                </form>
+                {% endif %}
+                {% if c.status == "pending" %}
+                <form action="/api/reject" method="post" class="inline">
+                    <input type="hidden" name="sku" value="{{ sku }}">
+                    <input type="hidden" name="task" value="{{ task_id }}">
+                    <input type="hidden" name="candidate" value="{{ c.index }}">
+                    <input type="hidden" name="platform" value="temu">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <button type="submit" class="btn small secondary">Reject</button>
+                </form>
+                {% endif %}
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <p class="muted">No candidates generated for this task yet.</p>
+    {% endif %}
+</section>
+{% else %}
+<section class="card">
+    <div class="alert error">Task not found in manifest.</div>
+</section>
+{% endif %}
+{% endblock %}

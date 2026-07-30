@@ -1,0 +1,15 @@
+name: model_half
+version: "1.0.0"
+base: |
+  Professional e-commerce product photo of a {{ ethnicity }} model wearing a {{ color }} {{ category }}.
+  Natural commercial photography, soft studio lighting, clean neutral background.
+  Half-body / waist-up view, showing fabric texture and garment details.
+  High detail, photorealistic, {{ scene }}.
+  
+  Garment preservation rules:
+  {{ preservation_rules }}
+  
+  Avoid:
+  {{ avoid_rules }}
+  
+  Do not add any text, logo, watermark, or graphic overlay.

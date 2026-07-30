@@ -1,0 +1,14 @@
+name: multi_reference_edit
+version: "1.0.0"
+base: |
+  Edit the provided reference image of a {{ color }} {{ category }} to create a professional e-commerce feature detail shot.
+  Focus on the specified garment feature while preserving the exact original design.
+  Clean background, professional lighting, high detail, photorealistic.
+  
+  Garment preservation rules:
+  {{ preservation_rules }}
+  
+  Avoid:
+  {{ avoid_rules }}
+  
+  Do not add any text, logo, watermark, or graphic overlay.

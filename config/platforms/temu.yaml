@@ -1,0 +1,106 @@
+# TEMU Image Factory - TEMU 平台模板配置
+
+platform: temu
+
+# 默认画布
+ratio: "3:4"
+width: 1500
+height: 2000
+background_color: "#FFFFFF"
+
+# 字体配置（容器内需存在对应字体）
+fonts:
+  title: "DejaVuSans-Bold.ttf"
+  body: "DejaVuSans.ttf"
+  fallback_size: 48
+
+# 默认任务列表
+tasks:
+  - id: "01_main"
+    name: "Main Image"
+    type: deterministic
+    description: "基于原图进行白底/裁剪等确定性处理，不调用收费 AI"
+    required_images:
+      - front
+
+  - id: "02_model_front"
+    name: "Model Front"
+    type: ai_generate
+    description: "欧美成年男性正面模特图"
+    task_category: model_front
+
+  - id: "03_model_back"
+    name: "Model Back"
+    type: ai_generate
+    description: "欧美成年男性背面模特图"
+    task_category: model_back
+
+  - id: "04_model_half"
+    name: "Model Half"
+    type: ai_generate
+    description: "半身/细节展示图"
+    task_category: model_half
+
+  - id: "05_feature_pocket"
+    name: "Feature Pocket"
+    type: ai_edit
+    description: "口袋卖点素材"
+    task_category: multi_reference_edit
+    required_images:
+      - front
+      - pocket
+
+  - id: "06_feature_fabric"
+    name: "Feature Fabric"
+    type: ai_edit
+    description: "面料卖点素材"
+    task_category: multi_reference_edit
+    required_images:
+      - front
+      - fabric
+
+  - id: "07_lifestyle"
+    name: "Lifestyle"
+    type: ai_generate
+    description: "生活场景图"
+    task_category: lifestyle_final
+
+  - id: "08_size_guide"
+    name: "Size Guide"
+    type: deterministic
+    description: "由程序生成尺码表，禁止调用 AI"
+
+# TEMU 平台安全/内容规则
+content_rules:
+  avoid:
+    - weapons
+    - firearms
+    - military emblems
+    - military ranks
+    - national flags
+    - helmets
+    - battlefield backgrounds
+    - military badges
+
+# 模特方向
+model_direction:
+  ethnicity: "western adult male"
+  style: "natural commercial photography"
+  scene: "ordinary outdoor / daily workwear display"
+  avoid:
+    - obvious military identity
+    - military scenes
+
+# 服装保护规则
+garment_preservation:
+  - "Preserve the exact garment design."
+  - "Preserve pocket count and pocket placement."
+  - "Preserve zipper placement."
+  - "Preserve hook-and-loop placement."
+  - "Preserve stitching structure."
+  - "Preserve fabric texture."
+  - "Preserve ripstop grid if visible."
+  - "Do not invent additional pockets."
+  - "Do not remove existing structural details."
+  - "Do not add logos, insignia, badges or text."
+  - "Do not redesign the garment."

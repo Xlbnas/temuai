@@ -1,0 +1,7 @@
+# TEMU Image Factory - 预算保护配置
+
+currency: USD
+max_cost_per_task: 0.30
+max_cost_per_sku: 2.00
+max_attempts_per_task: 3
+live_api_enabled: false

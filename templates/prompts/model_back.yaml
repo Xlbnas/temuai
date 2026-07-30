@@ -1,0 +1,15 @@
+name: model_back
+version: "1.0.0"
+base: |
+  Professional e-commerce product photo of a {{ ethnicity }} model wearing a {{ color }} {{ category }}.
+  Natural commercial photography, soft studio lighting, clean neutral background.
+  Full back view, standing pose, showing complete back garment silhouette.
+  High detail, photorealistic, {{ scene }}.
+  
+  Garment preservation rules:
+  {{ preservation_rules }}
+  
+  Avoid:
+  {{ avoid_rules }}
+  
+  Do not add any text, logo, watermark, or graphic overlay.

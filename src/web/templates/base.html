@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}TEMU Image Factory{% endblock %}</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+</head>
+<body>
+    <header>
+        <div class="container">
+            <a href="/" class="brand">TEMU Image Factory</a>
+            {% if user %}
+            <nav>
+                <span class="user">{{ user }}</span>
+                <form action="/logout" method="post" class="inline">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <button type="submit" class="btn secondary">Logout</button>
+                </form>
+            </nav>
+            {% endif %}
+        </div>
+    </header>
+    <main class="container">
+        {% block content %}{% endblock %}
+    </main>
+    <footer class="container">
+        <p class="muted">TEMU Image Factory Core + Web UI. AI calls only happen when explicitly confirmed.</p>
+    </footer>
+</body>
+</html>

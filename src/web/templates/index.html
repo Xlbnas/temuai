@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}Dashboard - TEMU Image Factory{% endblock %}
+{% block content %}
+<h1>SKU Dashboard</h1>
+<div class="actions">
+    <a href="/products/new" class="btn primary">New Product</a>
+</div>
+<table class="sku-table">
+    <thead>
+        <tr>
+            <th>SKU</th>
+            <th>Platform</th>
+            <th>Valid</th>
+            <th>Last Build</th>
+            <th>Est. Cost</th>
+            <th>Has Output</th>
+            <th></th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for item in sku_list %}
+        <tr>
+            <td>{{ item.sku }}</td>
+            <td>{{ item.platform }}</td>
+            <td>{% if item.valid %}<span class="badge ok">OK</span>{% else %}<span class="badge warn">NO</span>{% endif %}</td>
+            <td>{{ item.last_build or "—" }}</td>
+            <td>${{ "%.2f"|format(item.estimated_cost) }}</td>
+            <td>{% if item.has_output %}<span class="badge ok">YES</span>{% else %}<span class="badge">NO</span>{% endif %}</td>
+            <td><a href="/products/{{ item.sku }}" class="btn small">Open</a></td>
+        </tr>
+        {% else %}
+        <tr><td colspan="7" class="muted">No SKU found. Create one via New Product.</td></tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endblock %}

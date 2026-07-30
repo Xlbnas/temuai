@@ -1,0 +1,14 @@
+name: product_scene
+version: "1.0.0"
+base: |
+  Product scene photo of a {{ color }} {{ category }} placed in a clean, minimal workwear / outdoor setting.
+  Sharp focus on the garment, soft background blur.
+  Professional e-commerce lighting.
+  
+  Garment preservation rules:
+  {{ preservation_rules }}
+  
+  Avoid:
+  {{ avoid_rules }}
+  
+  Do not add any text, logo, watermark, or graphic overlay.

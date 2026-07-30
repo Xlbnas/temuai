@@ -1,0 +1,55 @@
+# TEMU Image Factory - Docker Compose for NAS deployment
+# Usage:
+#   cp .env.example .env
+#   # edit .env with your APP_PASSWORD_HASH, SESSION_SECRET, APIYI_API_KEY
+#   docker compose up -d
+#
+# Persistence: everything user-owned lives under ./data on the host.
+# `docker compose down && docker compose up -d` (or image upgrades) never lose:
+# SKUs, originals, generated results, cost ledgers, configs, prompt templates,
+# or the future SQLite database.
+
+services:
+  temu-image-factory:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: temu-image-factory:latest
+    container_name: temu-image-factory
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      # PUID/PGID allow matching NAS host user for file permissions
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1000}
+      # Unified directory layout inside the container
+      - CONFIG_DIR=/app/config
+      - TEMPLATE_DIR=/app/templates
+      - DATA_DIR=/app/data
+      - INPUT_DIR=/app/input
+      - OUTPUT_DIR=/app/output
+      - CACHE_DIR=/app/cache
+      - LOGS_DIR=/app/logs
+      # Only enable when behind a trusted reverse proxy (HTTPS termination)
+      - TRUST_PROXY_HEADERS=${TRUST_PROXY_HEADERS:-false}
+    volumes:
+      # Persistent data directories on the NAS host
+      - ./data/input:/app/input
+      - ./data/output:/app/output
+      - ./data/cache:/app/cache
+      - ./data/logs:/app/logs
+      # Configs & prompt templates: seeded from image defaults on first start,
+      # never overwritten afterwards (see entrypoint.sh / src.utils.bootstrap)
+      - ./data/config:/app/config
+      - ./data/templates:/app/templates
+      # Application data (future SQLite job database: /app/data/app.db)
+      - ./data/app:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s

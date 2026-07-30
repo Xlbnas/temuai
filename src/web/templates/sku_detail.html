@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}{{ sku }} - TEMU Image Factory{% endblock %}
+{% block content %}
+<h1>{{ sku }}</h1>
+
+<section class="card">
+    <h2>Validation</h2>
+    {% if validation.valid %}
+    <div class="alert ok">Valid</div>
+    {% else %}
+    <div class="alert error">
+        <strong>Invalid:</strong>
+        <ul>{% for e in validation.errors %}<li>{{ e }}</li>{% endfor %}</ul>
+    </div>
+    {% endif %}
+    {% if validation.warnings %}
+    <div class="alert warn">
+        <strong>Warnings:</strong>
+        <ul>{% for w in validation.warnings %}<li>{{ w }}</li>{% endfor %}</ul>
+    </div>
+    {% endif %}
+</section>
+
+<section class="card">
+    <h2>Actions</h2>
+    <form action="/api/build-dry-run" method="post" class="inline">
+        <input type="hidden" name="sku" value="{{ sku }}">
+        <input type="hidden" name="platform" value="temu">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" class="btn secondary">Build Dry Run</button>
+    </form>
+    <span class="muted">AI generate actions are available per task below.</span>
+</section>
+
+<section class="card">
+    <h2>Tasks</h2>
+    {% if manifest %}
+    <table class="task-table">
+        <thead>
+            <tr><th>ID</th><th>Status</th><th>Model</th><th>Provider</th><th>Candidates</th><th>Est. Cost</th><th>Actions</th></tr>
+        </thead>
+        <tbody>
+            {% for task in manifest.tasks %}
+            <tr>
+                <td>{{ task.task_id }}</td>
+                <td><span class="badge {{ task.status }}">{{ task.status }}</span></td>
+                <td>{{ task.model or "—" }}</td>
+                <td>{{ task.provider or "—" }}</td>
+                <td>{{ task.candidates|length }}</td>
+                <td>${{ "%.3f"|format(task.estimated_cost_usd) }}</td>
+                <td>
+                    {% if task.candidates %}
+                    <a href="/products/{{ sku }}/task/{{ task.task_id }}" class="btn small">View Candidates</a>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    <p class="muted">Total estimated cost: ${{ "%.3f"|format(manifest.total_estimated_cost_usd) }}</p>
+    {% else %}
+    <p class="muted">No manifest yet. Run Build Dry Run first.</p>
+    {% endif %}
+</section>
+{% endblock %}

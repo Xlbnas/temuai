@@ -1,0 +1,39 @@
+sku: F116-Black
+
+product:
+  category: jacket
+  color: black
+
+fabric:
+  name: Ripstop Fabric
+
+features:
+  - id: pocket
+    title: Multiple Utility Pockets
+    subtitle: Secure Storage & Easy Access
+  - id: fabric
+    title: Ripstop Grid
+    subtitle: Durable Outdoor Fabric
+  - id: cuff
+    title: Adjustable Cuffs
+    subtitle: Flexible Fit
+
+images:
+  front: originals/front.png
+  back: originals/back.png
+  pocket: originals/pocket.png
+  fabric: originals/fabric.png
+
+sizes:
+  S:
+    chest_cm: 112
+    length_cm: 72
+  M:
+    chest_cm: 116
+    length_cm: 74
+  L:
+    chest_cm: 120
+    length_cm: 76
+  XL:
+    chest_cm: 124
+    length_cm: 78
