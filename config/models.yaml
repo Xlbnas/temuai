@@ -27,6 +27,9 @@ models:
     timeout: 180
     estimated_cost_mode: request
     estimated_cost_usd: 0.034
+    pricing_version: repository-estimate-2026-07
+    pricing_status: unknown
+    pricing_source: existing_repository_estimate_not_provider_verified
     role: draft
 
   nano_banana_2:
@@ -42,6 +45,9 @@ models:
     timeout: 360
     estimated_cost_mode: request
     estimated_cost_usd: 0.055
+    pricing_version: repository-estimate-2026-07
+    pricing_status: unknown
+    pricing_source: existing_repository_estimate_not_provider_verified
     role: production
 
   gpt_image_2_vip:
@@ -104,6 +110,9 @@ models:
     timeout: 300
     estimated_cost_mode: request
     estimated_cost_usd: 0.03
+    pricing_version: repository-estimate-2026-07
+    pricing_status: unknown
+    pricing_source: existing_repository_estimate_not_provider_verified
     role: draft
 
   gpt_image_2:
@@ -123,4 +132,7 @@ models:
     timeout: 360
     estimated_cost_mode: dynamic
     estimated_cost_usd: 0.06
+    pricing_version: repository-estimate-2026-07
+    pricing_status: unknown
+    pricing_source: existing_repository_estimate_not_provider_verified
     role: precision

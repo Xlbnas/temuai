@@ -13,7 +13,16 @@ from pathlib import Path
 from PIL import Image, ImageOps
 
 from src.core.config import AppConfig
+from src.core.ledger import CostLedger
 from src.studio.analyzers import AssetAnalyzer, NotConfiguredAssetAnalyzer
+from src.studio.apiyi import (
+    APIYIGenerationRequest,
+    APIYIImageGenerationProvider,
+    APIYIProviderError,
+    APIYIProviderErrorCode,
+    APIYIReference,
+    safe_provider_error,
+)
 from src.studio.generation import (
     MockImageGenerationProvider,
     blocking_reasons,
@@ -148,6 +157,7 @@ class StudioService:
     def __init__(self, config: AppConfig) -> None:
         self.config = config
         self.store = StudioStore(config.data_dir)
+        self.ledger = CostLedger(config.logs_dir)
 
     def create_project(
         self, name: str, platform: StudioPlatform = StudioPlatform.TEMU
@@ -596,6 +606,38 @@ class StudioService:
     def mock_capability() -> ProviderCapability:
         return MockImageGenerationProvider().capability()
 
+    def apiyi_capability(self, model: str) -> ProviderCapability:
+        """Expose configured capability without reading or displaying a secret."""
+        return APIYIImageGenerationProvider.capability_for(self.config, model)
+
+    def provider_status(self, model: str) -> dict[str, object]:
+        capability = self.apiyi_capability(model)
+        configured = bool(os.getenv("APIYI_API_KEY"))
+        return {
+            "provider": "apiyi",
+            "model": capability.model,
+            "status": "ready" if configured else "not_configured",
+            "live_enabled": self.config.safe_env("LIVE_GENERATION_ENABLED", "false").lower() == "true",
+            "capability": capability.model_dump(mode="json"),
+        }
+
+    def cost_preview(self, project_id: str, plan_id: str, provider: str, model: str, shot_id: str) -> dict[str, object]:
+        record = self.store.load(project_id)
+        plan = self._shot_plan(record, plan_id)
+        shot = self._shot_by_id(record, shot_id)
+        if shot not in plan.shots or not shot.enabled:
+            raise KeyError("Enabled Shot not found")
+        if provider != "apiyi":
+            raise ValueError("Only apiyi has a Studio live cost preview")
+        capability = self.apiyi_capability(model)
+        return {
+            "provider": provider, "model": capability.model, "shot_id": shot_id,
+            "pricing_status": capability.pricing_status,
+            "pricing_version": capability.pricing_version,
+            "pricing_source": capability.pricing_source,
+            "estimated_cost": capability.estimated_price_usd if capability.pricing_status != "unknown" else None,
+        }
+
     def compile_shot_plan(self, project_id: str) -> ShotPlan:
         with self.store.lock(project_id):
             record = self.store.load(project_id)
@@ -745,7 +787,10 @@ class StudioService:
         confirmed_by: str | None = None,
         generation_nonce: str | None = None,
     ) -> GenerationJob:
+        capability: ProviderCapability | None = None
         if mode != "mock":
+            if mode != "live":
+                raise ValueError("Generation mode must be mock or live")
             # LIVE_GENERATION_ENABLED deliberately defaults false even when a key exists.
             live_policy = budget_policy or default_budget_policy()
             if live_policy.job_limit is None or live_policy.job_limit <= 0:
@@ -754,7 +799,15 @@ class StudioService:
                 raise ValueError("Live generation is disabled by LIVE_GENERATION_ENABLED=false")
             if provider != "apiyi" or not paid_confirmation:
                 raise ValueError("Live generation requires verified provider and explicit paid confirmation")
-            raise ValueError("NotConfigured: APIYI Studio adapter has no verified request contract")
+            if not os.getenv("APIYI_API_KEY"):
+                raise ValueError("NotConfigured: APIYI is not configured")
+            if not confirmed_by:
+                raise ValueError("Live generation requires an explicit user confirmation")
+            capability = self.apiyi_capability(model)
+            if capability.pricing_status == "unknown" or capability.estimated_price_usd is None:
+                raise ValueError("pricing_unknown: live generation requires a verified versioned price")
+            if shot_id is None:
+                raise ValueError("Live generation requires exactly one --shot-id")
         with self.store.lock(project_id):
             record = self.store.load(project_id)
             plan = self._shot_plan(record, plan_id)
@@ -767,6 +820,8 @@ class StudioService:
                     raise KeyError("Enabled Shot not found")
             if not selected_shots:
                 raise ValueError("Enable at least one Shot before generation")
+            if mode == "live" and len(selected_shots) != 1:
+                raise ValueError("Live generation requires exactly one enabled shot")
             shot_ids = {shot.id for shot in selected_shots}
             packages = {package.shot_id: package for package in record.prompt_packages if not package.stale}
             missing = shot_ids - packages.keys()
@@ -777,9 +832,29 @@ class StudioService:
             intent = "manual_regeneration" if manual_regeneration else "initial"
             nonce = generation_nonce or (new_id() if manual_regeneration else None)
             policy = budget_policy or default_budget_policy()
+            unit_cost = 0.0 if mode == "mock" else capability.estimated_price_usd if capability else None
+            if unit_cost is None:
+                raise ValueError("pricing_unknown: live generation requires a verified versioned price")
+            estimated_total = unit_cost * len(selected_shots)
+            if mode == "live":
+                if policy.shot_limit is not None and unit_cost > policy.shot_limit:
+                    raise ValueError("budget_rejected: shot budget would be exceeded")
+                if policy.job_limit is not None and estimated_total > policy.job_limit:
+                    raise ValueError("budget_rejected: job budget would be exceeded")
+                previous_reserved = sum(
+                    item.reserved_cost or 0.0 for item in record.generation_jobs
+                    if item.mode == "live" and item.status in {
+                        GenerationStatus.QUEUED, GenerationStatus.SUBMITTING,
+                        GenerationStatus.RUNNING, GenerationStatus.PROVIDER_PENDING,
+                        GenerationStatus.DOWNLOADING, GenerationStatus.UNKNOWN,
+                        GenerationStatus.RECONCILE_REQUIRED,
+                    }
+                )
+                if policy.project_limit is not None and previous_reserved + estimated_total > policy.project_limit:
+                    raise ValueError("budget_rejected: project budget would be exceeded")
             job = GenerationJob(
-                project_id=project_id, shot_plan_id=plan_id, mode="mock", provider="mock", model=model,
-                budget_policy=policy, estimated_total_cost=0.0, reserved_cost=0.0, confirmed_at=utc_now(),
+                project_id=project_id, shot_plan_id=plan_id, mode=mode, provider=provider, model=model,
+                budget_policy=policy, estimated_total_cost=estimated_total, reserved_cost=estimated_total, confirmed_at=utc_now(),
                 generation_intent=intent, confirmed_by=confirmed_by,
             )
             for shot in selected_shots:
@@ -787,7 +862,7 @@ class StudioService:
                 package = packages[current_shot_id]
                 previous = [item for item in record.generation_attempts if item.shot_id == current_shot_id]
                 number = max((item.attempt_number for item in previous), default=0) + 1
-                request_hash = self._request_hash(record, shot, package, "mock", "mock", model, nonce)
+                request_hash = self._request_hash(record, shot, package, mode, provider, model, nonce)
                 same_request = [item for item in record.generation_attempts if item.request_hash == request_hash]
                 if any(item.status in {GenerationStatus.QUEUED, GenerationStatus.RUNNING} for item in same_request):
                     raise ValueError("An identical request is already queued, running, or has succeeded")
@@ -799,9 +874,10 @@ class StudioService:
                     job_id=job.id, shot_id=current_shot_id, attempt_number=number,
                     request_hash=request_hash, prompt_package_id=package.id,
                     reference_asset_ids=package.product_reference_ids + package.detail_reference_ids + package.style_reference_ids,
-                    estimated_cost=0.0, idempotency_key=stable_hash({"job": job.id, "shot": current_shot_id}),
+                    estimated_cost=unit_cost, idempotency_key=request_hash,
                     generation_intent=intent, generation_nonce=nonce, confirmed_by=confirmed_by,
                 )
+                attempt.reference_manifest = self._reference_manifest(record, package)
                 record.generation_attempts.append(attempt)
             record.generation_jobs.append(job)
             record.project.updated_at = utc_now()
@@ -810,6 +886,12 @@ class StudioService:
 
     def run_generation_job(self, project_id: str, job_id: str, fail_shot_id: str | None = None) -> GenerationJob:
         """Claim persisted attempts one at a time; no automatic retry is performed."""
+        with self.store.lock(project_id):
+            record = self.store.load(project_id)
+            existing_job = self._generation_job(record, job_id)
+            live_job = existing_job.mode == "live"
+        if live_job:
+            return self.run_apiyi_generation_job(project_id, job_id)
         provider = MockImageGenerationProvider()
         while True:
             with self.store.lock(project_id):
@@ -867,15 +949,130 @@ class StudioService:
                     attempt.finished_at = utc_now()
                     self.store.save(record)
 
+    def run_apiyi_generation_job(self, project_id: str, job_id: str) -> GenerationJob:
+        """Submit one persisted live attempt once; timeout paths never resend it."""
+        with self.store.lock(project_id):
+            record = self.store.load(project_id)
+            job = self._generation_job(record, job_id)
+            if job.mode != "live" or job.provider != "apiyi":
+                raise ValueError("Job is not an APIYI live generation job")
+            attempt = next((item for item in record.generation_attempts if item.job_id == job_id and item.status == GenerationStatus.QUEUED), None)
+            if attempt is None:
+                self._refresh_job_status(job, [item for item in record.generation_attempts if item.job_id == job_id])
+                self.store.save(record)
+                return job
+            plan = self._shot_plan(record, job.shot_plan_id)
+            package = self._prompt_package(record, attempt.prompt_package_id)
+            if plan.status != PlanStatus.CONFIRMED or package.stale:
+                attempt.status = GenerationStatus.FAILED
+                attempt.error_code = "stale_prompt"
+                attempt.error_message_safe = "Prompt or Shot Plan became stale before dispatch."
+                attempt.finished_at = utc_now()
+                self._refresh_job_status(job, [item for item in record.generation_attempts if item.job_id == job_id])
+                self.store.save(record)
+                return job
+            shot = self._shot_by_id(record, attempt.shot_id)
+            request = self._apiyi_request(record, package, shot, attempt, job.model)
+            attempt.status = GenerationStatus.SUBMITTING
+            attempt.claimed_at = attempt.started_at = attempt.submitted_at = utc_now()
+            job.status = GenerationStatus.SUBMITTING
+            job.started_at = job.started_at or utc_now()
+            self.store.save(record)
+        try:
+            adapter = APIYIImageGenerationProvider(self.config, job.model, os.getenv("APIYI_API_KEY", ""))
+            submission = adapter.submit(request)
+            if not submission.provider_request_id:
+                raise APIYIProviderError(
+                    APIYIProviderErrorCode.RECONCILIATION_REQUIRED,
+                    "Provider accepted a result without a request ID; manual reconciliation is required.",
+                )
+            if len(submission.results) != 1:
+                raise APIYIProviderError(
+                    APIYIProviderErrorCode.MALFORMED_RESPONSE,
+                    "Single-shot Studio request returned an unexpected number of results.",
+                )
+            with self.store.lock(project_id):
+                record = self.store.load(project_id)
+                stored = self._attempt(record, attempt.id)
+                stored.provider_request_id = submission.provider_request_id
+                stored.status = GenerationStatus.DOWNLOADING
+                self._generation_job(record, job_id).status = GenerationStatus.DOWNLOADING
+                self.store.save(record)
+            content = adapter.client.download_result(submission.results[0])
+            with self.store.lock(project_id):
+                record = self.store.load(project_id)
+                stored = self._attempt(record, attempt.id)
+                candidate = self._persist_candidate(record, project_id, shot, stored, content)
+                stored.actual_cost = submission.actual_cost_usd
+                stored.status = GenerationStatus.SUCCEEDED
+                stored.finished_at = utc_now()
+                current_job = self._generation_job(record, job_id)
+                self._refresh_job_status(current_job, [item for item in record.generation_attempts if item.job_id == job_id])
+                self._record_live_ledger(current_job, stored, shot, "succeeded")
+                try:
+                    self.store.save(record)
+                except BaseException:
+                    record.candidates = [item for item in record.candidates if item.id != candidate.id]
+                    self._project_path(project_id, candidate.stored_path).unlink(missing_ok=True)
+                    raise
+                return current_job
+        except (OSError, RuntimeError, ValueError) as exc:
+            code, message = safe_provider_error(exc)
+            with self.store.lock(project_id):
+                record = self.store.load(project_id)
+                stored = self._attempt(record, attempt.id)
+                current_job = self._generation_job(record, job_id)
+                # Once the request may have left the process, neither recovery nor a worker may resend it.
+                if code in {"timeout_after_submission", "reconciliation_required"}:
+                    stored.status = GenerationStatus.RECONCILE_REQUIRED
+                    stored.reconciliation_note = message
+                else:
+                    stored.status = GenerationStatus.FAILED
+                stored.error_code = code
+                stored.error_message_safe = message
+                stored.finished_at = utc_now()
+                self._refresh_job_status(current_job, [item for item in record.generation_attempts if item.job_id == job_id])
+                self._record_live_ledger(current_job, stored, shot, stored.status.value)
+                self.store.save(record)
+                return current_job
+
+    def reconcile_attempt(self, project_id: str, attempt_id: str) -> GenerationAttempt:
+        """Safe reconciliation boundary.  No verified sync endpoint means no blind resend."""
+        with self.store.lock(project_id):
+            record = self.store.load(project_id)
+            attempt = self._attempt(record, attempt_id)
+            if attempt.provider_request_id:
+                attempt.status = GenerationStatus.RECONCILE_REQUIRED
+                attempt.reconciliation_note = "Provider request ID retained; no verified APIYI status endpoint is available."
+            else:
+                attempt.status = GenerationStatus.RECONCILE_REQUIRED
+                attempt.reconciliation_note = "Submission outcome is unknown and no provider request ID was retained."
+            attempt.error_code = "reconciliation_required"
+            attempt.error_message_safe = attempt.reconciliation_note
+            job = self._generation_job(record, attempt.job_id)
+            self._refresh_job_status(job, [item for item in record.generation_attempts if item.job_id == job.id])
+            self.store.save(record)
+            return attempt
+
+    def reconcile_job(self, project_id: str, job_id: str) -> list[GenerationAttempt]:
+        record = self.store.load(project_id)
+        return [self.reconcile_attempt(project_id, item.id) for item in record.generation_attempts if item.job_id == job_id and item.status in {GenerationStatus.UNKNOWN, GenerationStatus.RECONCILE_REQUIRED, GenerationStatus.SUBMITTING, GenerationStatus.RUNNING, GenerationStatus.PROVIDER_PENDING, GenerationStatus.DOWNLOADING}]
+
     def recover_interrupted_jobs(self, project_id: str) -> int:
         with self.store.lock(project_id):
             record = self.store.load(project_id)
             changed = 0
             for attempt in record.generation_attempts:
-                if attempt.status == GenerationStatus.RUNNING:
-                    attempt.status = GenerationStatus.INTERRUPTED
+                if attempt.status in {GenerationStatus.SUBMITTING, GenerationStatus.RUNNING, GenerationStatus.DOWNLOADING}:
+                    # A live request may already have reached APIYI; never turn it
+                    # into retryable work after a process restart.
+                    attempt.status = (
+                        GenerationStatus.RECONCILE_REQUIRED
+                        if self._generation_job(record, attempt.job_id).mode == "live"
+                        else GenerationStatus.INTERRUPTED
+                    )
                     attempt.finished_at = utc_now()
-                    attempt.error_code = "interrupted"
+                    attempt.error_code = "reconciliation_required" if attempt.status == GenerationStatus.RECONCILE_REQUIRED else "interrupted"
                     attempt.error_message_safe = "Recovered after process interruption; no automatic resend."
                     changed += 1
             for job in record.generation_jobs:
@@ -1007,8 +1204,12 @@ class StudioService:
     @staticmethod
     def _refresh_job_status(job: GenerationJob, attempts: list[GenerationAttempt]) -> None:
         statuses = [attempt.status for attempt in attempts]
-        if any(status == GenerationStatus.RUNNING for status in statuses):
+        if any(status in {GenerationStatus.SUBMITTING, GenerationStatus.RUNNING, GenerationStatus.DOWNLOADING} for status in statuses):
             job.status = GenerationStatus.RUNNING
+            job.finished_at = None
+            return
+        if any(status == GenerationStatus.PROVIDER_PENDING for status in statuses):
+            job.status = GenerationStatus.PROVIDER_PENDING
             job.finished_at = None
             return
         if any(status == GenerationStatus.QUEUED for status in statuses):
@@ -1017,13 +1218,15 @@ class StudioService:
             return
         if statuses and all(status == GenerationStatus.SUCCEEDED for status in statuses):
             job.status = GenerationStatus.SUCCEEDED
+        elif GenerationStatus.RECONCILE_REQUIRED in statuses or GenerationStatus.UNKNOWN in statuses:
+            job.status = GenerationStatus.RECONCILE_REQUIRED
         elif GenerationStatus.INTERRUPTED in statuses:
             job.status = GenerationStatus.INTERRUPTED
         else:
             job.status = GenerationStatus.FAILED
         job.finished_at = utc_now()
         costs = [attempt.actual_cost for attempt in attempts]
-        job.actual_total_cost = sum(cost for cost in costs if cost is not None)
+        job.actual_total_cost = sum(cost for cost in costs if cost is not None) if any(cost is not None for cost in costs) else None
 
     @staticmethod
     def _request_hash(
@@ -1057,6 +1260,57 @@ class StudioService:
                 "references": references,
                 "generation_nonce": generation_nonce,
             }
+        )
+
+    def _reference_manifest(self, record: StudioRecord, package: PromptPackage) -> list[dict[str, str]]:
+        assets = {asset.id: asset for asset in record.assets}
+        manifest: list[dict[str, str]] = []
+        for role, asset_ids in (
+            ("product_reference_clean", package.product_reference_ids),
+            ("detail_reference_clean", package.detail_reference_ids),
+            ("style_reference", package.style_reference_ids),
+        ):
+            for asset_id in asset_ids:
+                asset = assets.get(asset_id)
+                if asset:
+                    manifest.append({"role": role, "asset_id": asset.id, "sha256": asset.sha256})
+        return manifest
+
+    def _apiyi_request(
+        self, record: StudioRecord, package: PromptPackage, shot: ShotSpec, attempt: GenerationAttempt, model: str
+    ) -> APIYIGenerationRequest:
+        assets = {asset.id: asset for asset in record.assets}
+        references: list[APIYIReference] = []
+        for role, asset_ids in (
+            ("product_reference_clean", package.product_reference_ids),
+            ("detail_reference_clean", package.detail_reference_ids),
+            ("style_reference", package.style_reference_ids),
+        ):
+            for asset_id in asset_ids:
+                asset = assets.get(asset_id)
+                if asset is None:
+                    raise ValueError("Referenced asset is missing")
+                references.append(APIYIReference(
+                    role=role, asset_id=asset.id, sha256=asset.sha256, mime_type=asset.mime_type,
+                    path=self._project_path(record.project.id, asset.stored_path),
+                ))
+        return APIYIGenerationRequest(
+            model=model, prompt=package.rendered_prompt, negative_prompt=package.negative_prompt,
+            references=references, width=shot.width, height=shot.height,
+            aspect_ratio=shot.aspect_ratio, idempotency_key=attempt.idempotency_key,
+        )
+
+    def _record_live_ledger(
+        self, job: GenerationJob, attempt: GenerationAttempt, shot: ShotSpec, status_value: str
+    ) -> None:
+        """Append only safe identifiers and SHA values; never paths or provider URLs."""
+        self.ledger.record_call(
+            sku=f"studio-{job.project_id[:12]}", platform="studio", task=job.id,
+            provider=job.provider, model=job.model, request_id=attempt.provider_request_id,
+            attempt=attempt.attempt_number, input_images=[item["sha256"] for item in attempt.reference_manifest],
+            requested_size=f"{shot.width}x{shot.height}", aspect_ratio=shot.aspect_ratio,
+            estimated_cost_usd=attempt.estimated_cost or 0.0, actual_cost_usd=attempt.actual_cost,
+            status=status_value, accepted=False, error=attempt.error_code, duration_seconds=0.0,
         )
 
     @staticmethod
