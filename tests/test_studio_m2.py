@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from src.studio.analyzers import MockAssetAnalyzer
+from src.studio.generation import safe_error
 from src.studio.models import CandidateStatus, ContentKind, SourceKind, StudioPlatform
 from src.studio.service import StudioService
 from src.web.app import create_app
@@ -115,6 +116,45 @@ def test_partial_failure_and_recovery_do_not_retry(temp_config) -> None:
     retry = service.create_generation_job(project.id, plan.id, shot_id=plan.shots[0].id)
     service.run_generation_job(project.id, retry.id)
     assert len(service.get_record(project.id).candidates) == 5
+
+
+def test_generation_rejects_duplicate_queued_request_and_requires_an_enabled_shot(temp_config) -> None:
+    service = StudioService(temp_config)
+    project, *_ = _ready_project(service)
+    plan = service.compile_shot_plan(project.id)
+    service.compile_prompt_packages(project.id, plan.id)
+    service.confirm_shot_plan(project.id, plan.id, "tester")
+    service.create_generation_job(project.id, plan.id)
+    with pytest.raises(ValueError, match="already queued"):
+        service.create_generation_job(project.id, plan.id)
+    plan.shots = [shot.model_copy(update={"enabled": False}) for shot in plan.shots]
+    replacement = service.compile_shot_plan(project.id)
+    service.update_shot_plan(project.id, replacement.id, plan.shots)
+    service.confirm_shot_plan(project.id, replacement.id, "tester")
+    with pytest.raises(ValueError, match="Enable at least one Shot"):
+        service.create_generation_job(project.id, replacement.id)
+
+
+def test_candidate_output_uses_decoded_format_and_safe_error_redacts_credentials(temp_config) -> None:
+    service = StudioService(temp_config)
+    project, *_ = _ready_project(service)
+    plan = service.compile_shot_plan(project.id)
+    service.compile_prompt_packages(project.id, plan.id)
+    service.confirm_shot_plan(project.id, plan.id, "tester")
+    job = service.create_generation_job(project.id, plan.id, shot_id=plan.shots[0].id)
+    record = service.get_record(project.id)
+    attempt = next(item for item in record.generation_attempts if item.job_id == job.id)
+    image = Image.new("RGB", (200, 300), "purple")
+    output = BytesIO()
+    image.save(output, format="WEBP")
+    service._persist_candidate(record, project.id, plan.shots[0], attempt, output.getvalue())
+    candidate = record.candidates[-1]
+    assert candidate.mime_type == "image/webp"
+    assert candidate.stored_path.endswith(".webp")
+    with pytest.raises(ValueError, match="not a valid safe image"):
+        service._persist_candidate(record, project.id, plan.shots[0], attempt, b"not an image")
+    _, message = safe_error(RuntimeError("Authorization: Bearer secret API_KEY=also-secret"))
+    assert "secret" not in message
 
 
 def test_generation_web_page_and_candidate_media_are_authenticated_and_isolated(temp_config) -> None:

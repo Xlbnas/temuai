@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from io import BytesIO
 from typing import Any
 
@@ -227,7 +228,12 @@ class MockImageGenerationProvider:
 
 
 def safe_error(exc: Exception) -> tuple[str, str]:
-    text = str(exc).replace("Authorization", "[redacted]")[:300]
+    text = str(exc)
+    text = re.sub(
+        r"(?i)(authorization\s*[:=]\s*(?:bearer\s+)?)(\S+)", r"\1[redacted]", text
+    )
+    text = re.sub(r"(?i)(api[_-]?key\s*[:=]\s*)(\S+)", r"\1[redacted]", text)
+    text = text[:300]
     return ("provider_error", text)
 
 

@@ -701,11 +701,14 @@ class StudioService:
             plan = self._shot_plan(record, plan_id)
             if plan.status != PlanStatus.CONFIRMED:
                 raise ValueError("Confirm the Shot Plan before generation")
-            shot_ids = {shot.id for shot in plan.shots if shot.enabled}
+            selected_shots = [shot for shot in sorted(plan.shots, key=lambda item: item.sequence) if shot.enabled]
             if shot_id is not None:
-                if shot_id not in shot_ids:
+                selected_shots = [shot for shot in selected_shots if shot.id == shot_id]
+                if not selected_shots:
                     raise KeyError("Enabled Shot not found")
-                shot_ids = {shot_id}
+            if not selected_shots:
+                raise ValueError("Enable at least one Shot before generation")
+            shot_ids = {shot.id for shot in selected_shots}
             packages = {package.shot_id: package for package in record.prompt_packages if not package.stale}
             missing = shot_ids - packages.keys()
             if missing:
@@ -716,16 +719,22 @@ class StudioService:
                 budget_policy=policy, estimated_total_cost=0.0, reserved_cost=0.0, confirmed_at=utc_now(),
             )
             record.generation_jobs.append(job)
-            for current_shot_id in sorted(shot_ids):
+            for shot in selected_shots:
+                current_shot_id = shot.id
                 package = packages[current_shot_id]
                 previous = [item for item in record.generation_attempts if item.shot_id == current_shot_id]
                 number = max((item.attempt_number for item in previous), default=0) + 1
                 request_hash = stable_hash({"package": package.content_hash, "mode": "mock"})
                 if any(
-                    item.request_hash == request_hash and item.status in {GenerationStatus.RUNNING, GenerationStatus.SUCCEEDED}
+                    item.request_hash == request_hash
+                    and item.status in {
+                        GenerationStatus.QUEUED,
+                        GenerationStatus.RUNNING,
+                        GenerationStatus.SUCCEEDED,
+                    }
                     for item in record.generation_attempts
                 ):
-                    raise ValueError("An identical request is already running or has succeeded")
+                    raise ValueError("An identical request is already queued, running, or has succeeded")
                 attempt = GenerationAttempt(
                     job_id=job.id, shot_id=current_shot_id, attempt_number=number,
                     request_hash=request_hash, prompt_package_id=package.id,
@@ -837,22 +846,51 @@ class StudioService:
             raise FileNotFoundError("Candidate file not found")
         return path
 
-    def _persist_candidate(self, record: StudioRecord, project_id: str, shot: ShotSpec, attempt: GenerationAttempt, content: bytes) -> Candidate:
+    def _persist_candidate(
+        self,
+        record: StudioRecord,
+        project_id: str,
+        shot: ShotSpec,
+        attempt: GenerationAttempt,
+        content: bytes,
+    ) -> Candidate:
+        """Decode provider bytes before storage; never trust a supplied MIME or filename."""
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", Image.DecompressionBombWarning)
+                with Image.open(BytesIO(content)) as image:
+                    image_format = image.format
+                    if getattr(image, "n_frames", 1) != 1:
+                        raise ValueError("Animated or multi-frame candidate images are not supported")
+                    image.verify()
+                with Image.open(BytesIO(content)) as image:
+                    width, height = image.size
+        except (
+            Image.DecompressionBombError,
+            Image.DecompressionBombWarning,
+            OSError,
+            ValueError,
+        ) as exc:
+            raise ValueError("Provider result is not a valid safe image") from exc
+        if image_format not in ALLOWED_FORMATS:
+            raise ValueError("Provider result has an unsupported image format")
+        if width > MAX_IMAGE_DIMENSION or height > MAX_IMAGE_DIMENSION or width * height > MAX_IMAGE_PIXELS:
+            raise ValueError("Candidate dimensions exceed limits")
+        mime_type, extension = ALLOWED_FORMATS[image_format]
         digest = hashlib.sha256(content).hexdigest()
-        relative = f"generation/candidates/{attempt.id}/{new_id()}.png"
+        relative = f"generation/candidates/{attempt.id}/{new_id()}{extension}"
         path = self._project_path(project_id, relative)
         self._atomic_bytes(path, content)
-        try:
-            with Image.open(BytesIO(content)) as image:
-                image.verify()
-            with Image.open(BytesIO(content)) as image:
-                width, height = image.size
-            if width > MAX_IMAGE_DIMENSION or height > MAX_IMAGE_DIMENSION or width * height > MAX_IMAGE_PIXELS:
-                raise ValueError("Candidate dimensions exceed limits")
-        except (OSError, ValueError):
-            path.unlink(missing_ok=True)
-            raise ValueError("Provider result is not a valid safe image")
-        candidate = Candidate(project_id=project_id, shot_id=shot.id, attempt_id=attempt.id, stored_path=relative, sha256=digest, width=width, height=height, mime_type="image/png")
+        candidate = Candidate(
+            project_id=project_id,
+            shot_id=shot.id,
+            attempt_id=attempt.id,
+            stored_path=relative,
+            sha256=digest,
+            width=width,
+            height=height,
+            mime_type=mime_type,
+        )
         record.candidates.append(candidate)
         return candidate
 
