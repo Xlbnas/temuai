@@ -244,10 +244,15 @@ class PlanStatus(str, Enum):
 
 class GenerationStatus(str, Enum):
     QUEUED = "queued"
+    SUBMITTING = "submitting"
     RUNNING = "running"
+    PROVIDER_PENDING = "provider_pending"
+    DOWNLOADING = "downloading"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     INTERRUPTED = "interrupted"
+    UNKNOWN = "unknown"
+    RECONCILE_REQUIRED = "reconcile_required"
 
 
 class CandidateStatus(str, Enum):
@@ -329,7 +334,11 @@ class ProviderCapability(BaseModel):
     supports_negative_prompt: bool = True
     supported_aspect_ratios: list[str] = Field(default_factory=list)
     supported_output_sizes: list[str] = Field(default_factory=list)
+    synchronous: bool = True
     pricing_version: str | None = None
+    estimated_price_usd: float | None = Field(default=None, ge=0)
+    pricing_status: str = "unknown"
+    pricing_source: str | None = None
 
 
 class BudgetPolicy(BaseModel):
@@ -376,6 +385,7 @@ class GenerationAttempt(BaseModel):
     request_hash: str
     prompt_package_id: str
     reference_asset_ids: list[str] = Field(default_factory=list)
+    reference_manifest: list[dict[str, str]] = Field(default_factory=list)
     estimated_cost: float | None = 0.0
     actual_cost: float | None = None
     idempotency_key: str
@@ -387,6 +397,8 @@ class GenerationAttempt(BaseModel):
     generation_intent: str = "initial"
     generation_nonce: str | None = None
     confirmed_by: str | None = None
+    submitted_at: str | None = None
+    reconciliation_note: str | None = None
 
 
 class Candidate(BaseModel):

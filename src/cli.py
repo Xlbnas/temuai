@@ -264,9 +264,20 @@ def studio_compile_prompts(ctx: click.Context, project_id: str, plan_id: str) ->
 @studio.command("cost-preview")
 @click.argument("project_id")
 @click.argument("plan_id")
+@click.option("--provider", type=click.Choice(["mock", "apiyi"]), default="mock", show_default=True)
+@click.option("--model", default=None)
+@click.option("--shot-id", default=None)
 @click.pass_context
-def studio_cost_preview(ctx: click.Context, project_id: str, plan_id: str) -> None:
-    record = StudioService(ctx.obj["config"]).get_record(project_id)
+def studio_cost_preview(
+    ctx: click.Context, project_id: str, plan_id: str, provider: str, model: str | None, shot_id: str | None
+) -> None:
+    service = StudioService(ctx.obj["config"])
+    if provider == "apiyi":
+        if not model or not shot_id:
+            raise click.UsageError("APIYI cost preview requires --model and --shot-id")
+        click.echo(json.dumps(service.cost_preview(project_id, plan_id, provider, model, shot_id), indent=2))
+        return
+    record = service.get_record(project_id)
     plan = next((item for item in record.shot_plans if item.id == plan_id), None)
     if plan is None:
         raise click.ClickException("Shot Plan not found")
@@ -292,6 +303,8 @@ def studio_generate_mock(
 @click.argument("plan_id")
 @click.option("--mode", type=click.Choice(["live"]), required=True)
 @click.option("--provider", type=click.Choice(["apiyi"]), required=True)
+@click.option("--model", required=True)
+@click.option("--shot-id", required=True)
 @click.option("--max-cost", type=float, required=True)
 @click.option("--confirm-paid-generation", is_flag=True, required=True)
 @click.pass_context
@@ -301,6 +314,8 @@ def studio_generate_live(
     plan_id: str,
     mode: str,
     provider: str,
+    model: str,
+    shot_id: str,
     max_cost: float,
     confirm_paid_generation: bool,
 ) -> None:
@@ -316,11 +331,43 @@ def studio_generate_live(
             plan_id,
             mode=mode,
             provider=provider,
+            model=model,
+            shot_id=shot_id,
             budget_policy=BudgetPolicy(project_limit=max_cost, job_limit=max_cost, shot_limit=max_cost),
             paid_confirmation=confirm_paid_generation,
+            confirmed_by="cli-paid-confirmation",
         )
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
+
+
+@studio.command("provider-status")
+@click.option("--model", required=True)
+@click.pass_context
+def studio_provider_status(ctx: click.Context, model: str) -> None:
+    """Show safe provider readiness and configured capability; never prints a key."""
+    try:
+        click.echo(json.dumps(StudioService(ctx.obj["config"]).provider_status(model), indent=2))
+    except (KeyError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@studio.command("reconcile-job")
+@click.argument("project_id")
+@click.argument("job_id")
+@click.pass_context
+def studio_reconcile_job(ctx: click.Context, project_id: str, job_id: str) -> None:
+    attempts = StudioService(ctx.obj["config"]).reconcile_job(project_id, job_id)
+    click.echo(json.dumps([item.model_dump(mode="json") for item in attempts], indent=2))
+
+
+@studio.command("reconcile-attempt")
+@click.argument("project_id")
+@click.argument("attempt_id")
+@click.pass_context
+def studio_reconcile_attempt(ctx: click.Context, project_id: str, attempt_id: str) -> None:
+    attempt = StudioService(ctx.obj["config"]).reconcile_attempt(project_id, attempt_id)
+    click.echo(attempt.model_dump_json(indent=2))
 
 
 @studio.command("show-job")

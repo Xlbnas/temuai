@@ -3,7 +3,14 @@
 {% block content %}
 <p><a href="/studio/{{ record.project.id }}">← Studio project</a></p>
 <h1>Product Image Studio — Generation</h1>
-<p class="muted">Mock generation is offline and visibly watermarked. Live generation is disabled by default and is not available in M2A.</p>
+{% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+<p class="muted">Mock generation is offline and visibly watermarked. APIYI Live accepts only one confirmed Shot and never retries automatically.</p>
+<section class="card">
+  <h2>APIYI Provider capability</h2>
+  <p><strong>{{ apiyi_status.status }}</strong> · Nano Banana 2 · pricing {{ apiyi_status.capability.pricing_status or 'unknown' }}</p>
+  {% if not apiyi_status.live_enabled %}<p class="muted">Live generation is disabled by LIVE_GENERATION_ENABLED=false. Mock remains available.</p>{% endif %}
+  {% if apiyi_status.capability.pricing_status == 'unknown' %}<p class="muted">Live is blocked until a verified versioned price is configured; displayed legacy estimates are not treated as exact prices.</p>{% endif %}
+</section>
 {% if not record.shot_plans %}
 <section class="card"><h2>1. Shot Plan</h2><form method="post" action="/studio/{{ record.project.id }}/plans"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="btn primary">Compile default {{ record.project.target_platform.value }} 5-shot plan</button></form></section>
 {% endif %}
@@ -29,12 +36,23 @@
   {% elif plan.status.value == 'confirmed' %}
   <p><strong>Cost preview:</strong> Mock · $0 per shot · $0 total · pricing mock-0</p>
   <form method="post" action="/studio/{{ record.project.id }}/plans/{{ plan.id }}/generate/mock"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="btn primary">Generate enabled shots with Mock (free)</button></form>
+  <details><summary>Generate one Live APIYI Shot</summary>
+    <p class="muted">Review the prompt and references below. Annotation previews are never sent. The provider request ID is retained only as a short internal identifier.</p>
+    <form method="post" action="/studio/{{ record.project.id }}/plans/{{ plan.id }}/generate/live">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label>Shot <select name="shot_id">{% for shot in plan.shots if shot.enabled %}<option value="{{ shot.id }}">{{ shot.title }}</option>{% endfor %}</select></label>
+      <label>Model <select name="model"><option value="nano_banana_2">Nano Banana 2</option><option value="gpt_image_2_vip">GPT-Image-2-VIP</option></select></label>
+      <label>Hard max cost (USD) <input type="number" name="max_cost" min="0.01" step="0.01" required></label>
+      <label><input type="checkbox" name="confirm_paid_generation" required> I confirm this single paid generation</label>
+      <button class="btn secondary" {% if not apiyi_status.live_enabled or apiyi_status.capability.pricing_status == 'unknown' %}disabled{% endif %}>Generate one Live Shot</button>
+    </form>
+  </details>
   {% endif %}
 </section>
 {% endfor %}
 
 {% if record.prompt_packages %}<section class="card"><h2>Prompt Preview</h2>{% for package in record.prompt_packages %}<details><summary>{{ package.shot_id }} · {{ package.compiler_version }} · {{ package.content_hash[:16] }}{% if package.stale %} (stale){% endif %}</summary><p><strong>Facts:</strong> {{ package.structured_product_facts }}</p><p><strong>Provider references:</strong> product {{ package.product_reference_ids }}, detail {{ package.detail_reference_ids }}, style {{ package.style_reference_ids }}</p><p class="muted">Annotation previews are display-only: {{ package.annotation_preview_ids }}</p><pre>{{ package.rendered_prompt }}</pre><pre>{{ package.negative_prompt }}</pre></details>{% endfor %}</section>{% endif %}
 
-{% if record.generation_jobs %}<section class="card"><h2>Generation Jobs</h2><ul>{% for job in record.generation_jobs | reverse %}<li>{{ job.id[:12] }} · {{ job.status.value }} · {{ job.mode }} · estimated {{ job.estimated_total_cost if job.estimated_total_cost is not none else 'unknown' }}</li>{% endfor %}</ul></section>{% endif %}
-{% if record.candidates %}<section class="card"><h2>Candidate Gallery</h2><div class="candidate-grid">{% for candidate in record.candidates %}<article class="candidate-card"><img class="candidate-img" src="/studio/{{ record.project.id }}/candidates/{{ candidate.id }}/image" alt="Mock generation candidate"><p>{{ candidate.shot_id }} · {{ candidate.status.value }}</p><p class="muted">Attempt {{ candidate.attempt_id[:12] }} · {{ candidate.width }}×{{ candidate.height }} · $0</p>{% if candidate.status.value == 'generated' %}<form method="post" action="/studio/{{ record.project.id }}/candidates/{{ candidate.id }}/accept"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="btn primary small">Accept</button></form><form method="post" action="/studio/{{ record.project.id }}/candidates/{{ candidate.id }}/reject"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input name="reason" required placeholder="Rejection reason"><button class="btn secondary small">Reject</button></form>{% elif candidate.status.value == 'rejected' %}<form method="post" action="/studio/{{ record.project.id }}/candidates/{{ candidate.id }}/regenerate/mock"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><label><input name="confirm_regeneration" type="checkbox" required> Create one additional Mock candidate using this same prompt</label><button class="btn secondary small">Regenerate Mock</button></form>{% endif %}</article>{% endfor %}</div></section>{% endif %}
+{% if record.generation_jobs %}<section class="card"><h2>Generation Jobs</h2><ul>{% for job in record.generation_jobs | reverse %}<li>{{ job.id[:12] }} · {{ job.status.value }} · {{ job.mode }} · estimated {{ job.estimated_total_cost if job.estimated_total_cost is not none else 'unknown' }}{% for attempt in record.generation_attempts if attempt.job_id == job.id %}{% if attempt.provider_request_id %} · provider request {{ attempt.provider_request_id[:12] }}{% endif %}{% endfor %}</li>{% endfor %}</ul></section>{% endif %}
+{% if record.candidates %}<section class="card"><h2>Candidate Gallery</h2><div class="candidate-grid">{% for candidate in record.candidates %}<article class="candidate-card"><img class="candidate-img" src="/studio/{{ record.project.id }}/candidates/{{ candidate.id }}/image" alt="Mock generation candidate"><p>{{ candidate.shot_id }} · {{ candidate.status.value }}</p><p class="muted">Attempt {{ candidate.attempt_id[:12] }} · {{ candidate.width }}×{{ candidate.height }} · {{ candidate_costs.get(candidate.id, '$0') }}</p>{% if candidate.status.value == 'generated' %}<form method="post" action="/studio/{{ record.project.id }}/candidates/{{ candidate.id }}/accept"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="btn primary small">Accept</button></form><form method="post" action="/studio/{{ record.project.id }}/candidates/{{ candidate.id }}/reject"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input name="reason" required placeholder="Rejection reason"><button class="btn secondary small">Reject</button></form>{% elif candidate.status.value == 'rejected' %}<form method="post" action="/studio/{{ record.project.id }}/candidates/{{ candidate.id }}/regenerate/mock"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><label><input name="confirm_regeneration" type="checkbox" required> Create one additional Mock candidate using this same prompt</label><button class="btn secondary small">Regenerate Mock</button></form>{% endif %}</article>{% endfor %}</div></section>{% endif %}
 {% endblock %}
