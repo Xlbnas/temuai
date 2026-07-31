@@ -16,11 +16,12 @@ import base64
 import binascii
 import ipaddress
 import os
+import re
 import socket
 from enum import Enum
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -130,18 +131,42 @@ def _base_url(provider: str) -> str:
     return os.getenv("APIYI_OPENAI_BASE_URL", "https://api.apiyi.com/v1")
 
 
+def _default_allowed_result_hosts() -> set[str]:
+    """Hosts allowed for provider result downloads.
+
+    Derived from the configured APIYI base URLs (including the backup host)
+    because those are the only endpoints whose DNS the operator already trusts
+    for paid traffic; ``APIYI_RESULT_URL_HOSTS`` may add a verified CDN host.
+    """
+    hosts: set[str] = set()
+    for env, default in (
+        ("APIYI_GEMINI_BASE_URL", "https://api.apiyi.com"),
+        ("APIYI_OPENAI_BASE_URL", "https://api.apiyi.com/v1"),
+        ("APIYI_BACKUP_BASE_URL", "https://b.apiyi.com"),
+    ):
+        hostname = urlparse(os.getenv(env, default)).hostname
+        if hostname:
+            hosts.add(hostname.lower())
+    for item in os.getenv("APIYI_RESULT_URL_HOSTS", "").split(","):
+        item = item.strip().lower()
+        if item:
+            hosts.add(item)
+    return hosts
+
+
 class APIYIClient:
     """One-shot APIYI HTTP client.  It intentionally has no retry loop."""
 
     MAX_RESULT_BYTES = 25 * 1024 * 1024
     MAX_REDIRECTS = 2
 
-    def __init__(self, api_key: str, base_url: str, timeout: int) -> None:
+    def __init__(self, api_key: str, base_url: str, timeout: int, allowed_result_hosts: set[str] | None = None) -> None:
         if not api_key:
             raise APIYIProviderError(APIYIProviderErrorCode.NOT_CONFIGURED, "APIYI is not configured")
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self.allowed_result_hosts = {host.lower() for host in (allowed_result_hosts or set())}
 
     def _request(
         self, method: str, endpoint: str, *, json: dict[str, Any] | None = None,
@@ -156,10 +181,25 @@ class APIYIClient:
                     method, f"{self.base_url}{endpoint}", headers=headers, json=json, data=data, files=files
                 )
         except httpx.TimeoutException as exc:
+            # Every timeout class (connect/read/write/pool) is treated as possibly
+            # submitted: resending a paid request is never safe without reconciliation.
             raise APIYIProviderError(
                 APIYIProviderErrorCode.TIMEOUT_AFTER_SUBMISSION,
                 "Provider request timed out; reconciliation is required before any resend.",
             ) from exc
+        except httpx.ConnectError as exc:
+            # The TCP connection was never established, so no bytes reached the provider.
+            raise APIYIProviderError(APIYIProviderErrorCode.PROVIDER_FAILED, "Provider connection failed before submission") from exc
+        except httpx.NetworkError as exc:
+            # WriteError/ReadError/CloseError: the request body may already have been
+            # transmitted, so this must never be treated as safely retryable.
+            raise APIYIProviderError(
+                APIYIProviderErrorCode.RECONCILIATION_REQUIRED,
+                "Request may have reached the provider; reconciliation is required before any resend.",
+            ) from exc
+        except httpx.DecodingError as exc:
+            # A response was received but could not be decoded; the provider did process it.
+            raise APIYIProviderError(APIYIProviderErrorCode.MALFORMED_RESPONSE, "Provider response could not be decoded") from exc
         except httpx.HTTPError as exc:
             raise APIYIProviderError(APIYIProviderErrorCode.PROVIDER_FAILED, "Provider connection failed") from exc
         if response.status_code == 401 or response.status_code == 403:
@@ -176,11 +216,22 @@ class APIYIClient:
             raise APIYIProviderError(APIYIProviderErrorCode.MALFORMED_RESPONSE, "Provider returned an invalid response")
         return data_value
 
-    @staticmethod
-    def _result_url_is_safe(url: str) -> None:
+    def _result_url_is_safe(self, url: str) -> None:
+        """Allowlist + SSRF pre-check for provider result URLs.
+
+        The primary defense is a host allowlist built from the configured
+        provider base URLs (plus ``APIYI_RESULT_URL_HOSTS``); only hosts whose
+        DNS the operator already trusts for paid traffic are reachable.  The
+        resolved-address check stays as defense in depth against an allowlisted
+        host being rebound to a non-global address.  A DNS pre-check can never
+        fully close the resolve-twice window for an allowlisted host, which is
+        why unknown hosts are rejected outright instead.
+        """
         parsed = urlparse(url)
         if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
             raise APIYIProviderError(APIYIProviderErrorCode.UNSAFE_RESULT, "Provider result URL is unsafe")
+        if parsed.hostname.lower() not in self.allowed_result_hosts:
+            raise APIYIProviderError(APIYIProviderErrorCode.UNSAFE_RESULT, "Provider result host is not allowlisted")
         try:
             addresses = socket.getaddrinfo(parsed.hostname, None, type=socket.SOCK_STREAM)
             for item in addresses:
@@ -208,19 +259,32 @@ class APIYIClient:
         for _ in range(self.MAX_REDIRECTS + 1):
             self._result_url_is_safe(url)
             try:
-                with httpx.Client(timeout=min(self.timeout, 120), follow_redirects=False) as client:
-                    response = client.get(url)
+                with (
+                    httpx.Client(timeout=min(self.timeout, 120), follow_redirects=False) as client,
+                    client.stream("GET", url) as response,
+                ):
+                    if response.is_redirect:
+                        location = response.headers.get("location")
+                        if not location:
+                            break
+                        # Relative redirects stay on the allowlisted host; absolute
+                        # ones are re-validated (scheme/host/IP) on the next pass.
+                        url = urljoin(url, location)
+                        continue
+                    if response.status_code != 200:
+                        break
+                    chunks: list[bytes] = []
+                    received = 0
+                    for chunk in response.iter_bytes(64 * 1024):
+                        received += len(chunk)
+                        if received > self.MAX_RESULT_BYTES:
+                            raise APIYIProviderError(APIYIProviderErrorCode.UNSAFE_RESULT, "Provider image is too large")
+                        chunks.append(chunk)
+                    return b"".join(chunks)
+            except APIYIProviderError:
+                raise
             except httpx.HTTPError as exc:
                 raise APIYIProviderError(APIYIProviderErrorCode.UNSAFE_RESULT, "Provider image download failed") from exc
-            if response.is_redirect:
-                location = response.headers.get("location")
-                if not location:
-                    break
-                url = str(response.next_request.url) if response.next_request else location
-                continue
-            if response.status_code != 200 or len(response.content) > self.MAX_RESULT_BYTES:
-                break
-            return response.content
         raise APIYIProviderError(APIYIProviderErrorCode.UNSAFE_RESULT, "Provider image download was rejected")
 
 
@@ -232,7 +296,10 @@ class APIYIImageGenerationProvider:
     def __init__(self, config: AppConfig, model: str, api_key: str) -> None:
         self.config = config
         self.model_config = _model_config(config, model)
-        self.client = APIYIClient(api_key, _base_url(self.model_config.provider), self.model_config.timeout)
+        self.client = APIYIClient(
+            api_key, _base_url(self.model_config.provider), self.model_config.timeout,
+            allowed_result_hosts=_default_allowed_result_hosts(),
+        )
 
     @staticmethod
     def capability_for(config: AppConfig, model: str) -> ProviderCapability:
@@ -326,7 +393,21 @@ class APIYIImageGenerationProvider:
         return self.get_generation_status(provider_request_id)
 
 
+_SENSITIVE_HINT = re.compile(
+    r"(?i)(authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|"
+    r"bearer|cookie|credential|\bsig(nature)?=|x-amz-|https?://[^\s/@]+:[^\s/@]+@|base64)"
+)
+
+
 def safe_provider_error(exc: Exception) -> tuple[str, str]:
     if isinstance(exc, APIYIProviderError):
         return exc.code.value, exc.safe_message
-    return (APIYIProviderErrorCode.PROVIDER_FAILED.value, mask_message(str(exc))[:300] or "Provider request failed")
+    # Unknown exceptions are withhold-on-suspicion, mirroring the M2 safe_error
+    # boundary: no single regex is the last line of defense for secrets.
+    text = " ".join(str(exc).split())
+    if _SENSITIVE_HINT.search(text):
+        return (
+            APIYIProviderErrorCode.PROVIDER_FAILED.value,
+            "Provider request failed; sensitive provider details were withheld.",
+        )
+    return (APIYIProviderErrorCode.PROVIDER_FAILED.value, mask_message(text)[:300] or "Provider request failed")

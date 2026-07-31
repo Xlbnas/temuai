@@ -613,11 +613,21 @@ class StudioService:
     def provider_status(self, model: str) -> dict[str, object]:
         capability = self.apiyi_capability(model)
         configured = bool(os.getenv("APIYI_API_KEY"))
+        live_enabled = self.config.safe_env("LIVE_GENERATION_ENABLED", "false").lower() == "true"
+        pricing_known = capability.pricing_status != "unknown" and capability.estimated_price_usd is not None
+        # "ready" must mean the live gate would actually accept a request; a
+        # configured key with unknown pricing or disabled Live is locked.
+        if not configured:
+            status = "not_configured"
+        elif live_enabled and pricing_known:
+            status = "ready"
+        else:
+            status = "locked"
         return {
             "provider": "apiyi",
             "model": capability.model,
-            "status": "ready" if configured else "not_configured",
-            "live_enabled": self.config.safe_env("LIVE_GENERATION_ENABLED", "false").lower() == "true",
+            "status": status,
+            "live_enabled": live_enabled,
             "capability": capability.model_dump(mode="json"),
         }
 
@@ -864,12 +874,20 @@ class StudioService:
                 number = max((item.attempt_number for item in previous), default=0) + 1
                 request_hash = self._request_hash(record, shot, package, mode, provider, model, nonce)
                 same_request = [item for item in record.generation_attempts if item.request_hash == request_hash]
-                if any(item.status in {GenerationStatus.QUEUED, GenerationStatus.RUNNING} for item in same_request):
+                active_statuses = {
+                    GenerationStatus.QUEUED, GenerationStatus.SUBMITTING, GenerationStatus.RUNNING,
+                    GenerationStatus.PROVIDER_PENDING, GenerationStatus.DOWNLOADING,
+                }
+                if any(item.status in active_statuses for item in same_request):
                     raise ValueError("An identical request is already queued, running, or has succeeded")
                 if not manual_regeneration and any(
                     item.status == GenerationStatus.SUCCEEDED for item in same_request
                 ):
                     raise ValueError("An identical request is already queued, running, or has succeeded")
+                if any(item.status in {GenerationStatus.UNKNOWN, GenerationStatus.RECONCILE_REQUIRED} for item in same_request):
+                    # An uncertain paid outcome must be reconciled by a human before
+                    # the identical request may ever be created again.
+                    raise ValueError("An identical request has an uncertain outcome and must be reconciled before resubmission")
                 attempt = GenerationAttempt(
                     job_id=job.id, shot_id=current_shot_id, attempt_number=number,
                     request_hash=request_hash, prompt_package_id=package.id,
@@ -978,14 +996,15 @@ class StudioService:
             job.status = GenerationStatus.SUBMITTING
             job.started_at = job.started_at or utc_now()
             self.store.save(record)
+        submitted = False
         try:
             adapter = APIYIImageGenerationProvider(self.config, job.model, os.getenv("APIYI_API_KEY", ""))
             submission = adapter.submit(request)
-            if not submission.provider_request_id:
-                raise APIYIProviderError(
-                    APIYIProviderErrorCode.RECONCILIATION_REQUIRED,
-                    "Provider accepted a result without a request ID; manual reconciliation is required.",
-                )
+            # From here on the provider has done paid work: any failure is an
+            # uncertain outcome, never a safely retryable FAILED.
+            submitted = True
+            # A complete success without a provider request ID is still a
+            # success; neither verified sync contract guarantees a response ID.
             if len(submission.results) != 1:
                 raise APIYIProviderError(
                     APIYIProviderErrorCode.MALFORMED_RESPONSE,
@@ -1008,13 +1027,14 @@ class StudioService:
                 stored.finished_at = utc_now()
                 current_job = self._generation_job(record, job_id)
                 self._refresh_job_status(current_job, [item for item in record.generation_attempts if item.job_id == job_id])
-                self._record_live_ledger(current_job, stored, shot, "succeeded")
                 try:
                     self.store.save(record)
                 except BaseException:
                     record.candidates = [item for item in record.candidates if item.id != candidate.id]
                     self._project_path(project_id, candidate.stored_path).unlink(missing_ok=True)
                     raise
+                # Ledger is appended only after the result is durably settled.
+                self._record_live_ledger(current_job, stored, shot, "succeeded")
                 return current_job
         except (OSError, RuntimeError, ValueError) as exc:
             code, message = safe_provider_error(exc)
@@ -1022,8 +1042,21 @@ class StudioService:
                 record = self.store.load(project_id)
                 stored = self._attempt(record, attempt.id)
                 current_job = self._generation_job(record, job_id)
-                # Once the request may have left the process, neither recovery nor a worker may resend it.
-                if code in {"timeout_after_submission", "reconciliation_required"}:
+                if stored.status == GenerationStatus.SUCCEEDED:
+                    # The result and metadata were already durably saved; only the
+                    # trailing ledger append failed.  Never downgrade a settled
+                    # success — surface the original failure instead.
+                    raise
+                # Once the request may have left the process, neither recovery nor a
+                # worker may resend it.  malformed_response/unsafe_result are only
+                # raised after the provider answered, and ``submitted`` covers every
+                # later local failure (download, candidate validation, metadata save).
+                if submitted or code in {
+                    APIYIProviderErrorCode.TIMEOUT_AFTER_SUBMISSION.value,
+                    APIYIProviderErrorCode.RECONCILIATION_REQUIRED.value,
+                    APIYIProviderErrorCode.MALFORMED_RESPONSE.value,
+                    APIYIProviderErrorCode.UNSAFE_RESULT.value,
+                }:
                     stored.status = GenerationStatus.RECONCILE_REQUIRED
                     stored.reconciliation_note = message
                 else:
@@ -1041,14 +1074,29 @@ class StudioService:
         with self.store.lock(project_id):
             record = self.store.load(project_id)
             attempt = self._attempt(record, attempt_id)
-            if attempt.provider_request_id:
-                attempt.status = GenerationStatus.RECONCILE_REQUIRED
-                attempt.reconciliation_note = "Provider request ID retained; no verified APIYI status endpoint is available."
+            reconcilable = {
+                GenerationStatus.QUEUED, GenerationStatus.SUBMITTING, GenerationStatus.RUNNING,
+                GenerationStatus.PROVIDER_PENDING, GenerationStatus.DOWNLOADING,
+                GenerationStatus.UNKNOWN, GenerationStatus.RECONCILE_REQUIRED,
+            }
+            if attempt.status not in reconcilable:
+                raise ValueError("Only an unresolved attempt can be reconciled")
+            if attempt.status == GenerationStatus.QUEUED and attempt.submitted_at is None:
+                # Never dispatched: nothing reached the provider, so this is a safe,
+                # final failure rather than an uncertain paid outcome.
+                attempt.status = GenerationStatus.FAILED
+                attempt.error_code = "never_submitted"
+                attempt.error_message_safe = "Attempt was never dispatched to the provider; a new confirmed job is safe."
+                attempt.reconciliation_note = None
             else:
                 attempt.status = GenerationStatus.RECONCILE_REQUIRED
-                attempt.reconciliation_note = "Submission outcome is unknown and no provider request ID was retained."
-            attempt.error_code = "reconciliation_required"
-            attempt.error_message_safe = attempt.reconciliation_note
+                if attempt.provider_request_id:
+                    attempt.reconciliation_note = "Provider request ID retained; no verified APIYI status endpoint is available."
+                else:
+                    attempt.reconciliation_note = "Submission outcome is unknown and no provider request ID was retained."
+                attempt.error_code = "reconciliation_required"
+                attempt.error_message_safe = attempt.reconciliation_note
+            attempt.finished_at = attempt.finished_at or utc_now()
             job = self._generation_job(record, attempt.job_id)
             self._refresh_job_status(job, [item for item in record.generation_attempts if item.job_id == job.id])
             self.store.save(record)
@@ -1056,7 +1104,7 @@ class StudioService:
 
     def reconcile_job(self, project_id: str, job_id: str) -> list[GenerationAttempt]:
         record = self.store.load(project_id)
-        return [self.reconcile_attempt(project_id, item.id) for item in record.generation_attempts if item.job_id == job_id and item.status in {GenerationStatus.UNKNOWN, GenerationStatus.RECONCILE_REQUIRED, GenerationStatus.SUBMITTING, GenerationStatus.RUNNING, GenerationStatus.PROVIDER_PENDING, GenerationStatus.DOWNLOADING}]
+        return [self.reconcile_attempt(project_id, item.id) for item in record.generation_attempts if item.job_id == job_id and item.status in {GenerationStatus.QUEUED, GenerationStatus.UNKNOWN, GenerationStatus.RECONCILE_REQUIRED, GenerationStatus.SUBMITTING, GenerationStatus.RUNNING, GenerationStatus.PROVIDER_PENDING, GenerationStatus.DOWNLOADING}]
 
     def recover_interrupted_jobs(self, project_id: str) -> int:
         with self.store.lock(project_id):

@@ -15,10 +15,13 @@ Base URLs continue to come from the existing `APIYI_GEMINI_BASE_URL` and
 `APIYI_OPENAI_BASE_URL` environment settings (with their repository defaults),
 and the key is read only at dispatch time from `APIYI_API_KEY`.
 
-The verified contracts are synchronous. A returned response `id` is persisted
-as `provider_request_id`; no APIYI polling URL or async task schema is present
-in the repository, so M2B deliberately does not invent one. Status lookup is
-an explicit `reconciliation_required` result.
+The verified contracts are synchronous. When a response carries an `id` it is
+persisted as `provider_request_id`; neither verified contract guarantees one
+(the legacy adapters fall back to locally generated IDs), so a complete
+success without an ID still succeeds with `provider_request_id = null`. No
+APIYI polling URL or async task schema is present in the repository, so M2B
+deliberately does not invent one. Status lookup is an explicit
+`reconciliation_required` result.
 
 ## Capability and pricing
 
@@ -51,21 +54,30 @@ rechecks budget.
 ## State machine and reconciliation
 
 `queued -> submitting -> downloading -> succeeded` is the normal synchronous
-path. The client has no retry loop. A submission timeout, missing response ID,
-or restart during a live request becomes `reconcile_required`; it is never
-resent. A retained `provider_request_id` is shown only as a short identifier.
-Known rejected requests become `failed`. `studio reconcile-job` and
-`studio reconcile-attempt` preserve this boundary and never call an invented
-status endpoint.
+path. The client has no retry loop. Every timeout class, a network failure
+after bytes may have been sent, a malformed success response, a failed
+download, and any local persistence failure after a successful submit become
+`reconcile_required`; they are never resent. Only pre-submission failures
+(connect error, provider 4xx rejection, local validation, stale prompt) become
+`failed`. An attempt that was never dispatched (`queued`, no `submitted_at`)
+may be marked `never_submitted` by reconciliation, which is the only safe
+re-run path. A retained `provider_request_id` is shown only as a short
+identifier. `studio reconcile-job` and `studio reconcile-attempt` preserve
+this boundary and never call an invented status endpoint.
 
 ## Result safety and accounting
 
 Base64 has a strict encoded-size limit and strict decoding. URL results accept
-HTTPS only, reject userinfo and non-global resolved IPs, disallow unlimited
-redirects, cap download size, and are passed through existing candidate image
-verification (real image format, one frame, dimension/pixel limits, canonical
-re-encoding, SHA, project-local storage, and orphan cleanup). Raw result URLs,
-base64, credentials, and local paths are not put in the ledger or UI.
+HTTPS only, reject userinfo, and require the host to be allowlisted: the
+allowlist defaults to the configured APIYI base/backup hosts and can only be
+extended through `APIYI_RESULT_URL_HOSTS`. As defense in depth the resolved
+addresses must also be global, each redirect hop is re-validated, redirect
+count is bounded, and the body is streamed with a hard byte cap so an
+oversized or Content-Length-less response is rejected while reading rather
+than after. Results then pass through existing candidate image verification
+(real image format, one frame, dimension/pixel limits, canonical re-encoding,
+SHA, project-local storage, and orphan cleanup). Raw result URLs, base64,
+credentials, and local paths are not put in the ledger or UI.
 
 Live jobs reserve the verified estimated amount before dispatch and append a
 safe ledger entry at settlement or an unknown/reconciliation outcome. Until

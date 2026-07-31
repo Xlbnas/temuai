@@ -267,6 +267,30 @@ async def reference_board(
         raise HTTPException(status_code=404, detail="Reference board not found")
 
 
+def _provider_status_context(service: StudioService) -> dict[str, Any]:
+    try:
+        return service.provider_status("nano_banana_2")
+    except (KeyError, ValueError):  # pragma: no cover - broken config is rendered safely
+        return {"status": "not_configured", "live_enabled": False, "capability": {}}
+
+
+def _candidate_costs(record: Any) -> dict[str, str]:
+    """Per-candidate cost label; a live unknown cost is never rendered as $0."""
+    attempts = {attempt.id: attempt for attempt in record.generation_attempts}
+    jobs = {job.id: job for job in record.generation_jobs}
+    costs: dict[str, str] = {}
+    for candidate in record.candidates:
+        attempt = attempts.get(candidate.attempt_id)
+        job = jobs.get(attempt.job_id) if attempt else None
+        if attempt is not None and attempt.actual_cost is not None:
+            costs[candidate.id] = f"${attempt.actual_cost:.2f}"
+        elif job is not None and job.mode == "live":
+            costs[candidate.id] = "cost unknown"
+        else:
+            costs[candidate.id] = "$0"
+    return costs
+
+
 @router.get("/studio/{project_id}/generation", response_class=HTMLResponse)
 async def generation_page(
     request: Request, project_id: str, username: str = Depends(get_current_username)
@@ -276,13 +300,10 @@ async def generation_page(
     except KeyError:
         raise HTTPException(status_code=404, detail="Studio project not found")
     service = _service(request)
-    try:
-        apiyi_status = service.provider_status("nano_banana_2")
-    except (KeyError, ValueError):  # pragma: no cover - broken config is rendered safely
-        apiyi_status = {"status": "not_configured", "live_enabled": False, "capability": {}}
     return _view(
         request, "studio_generation.html", record=record, user=username, error=None,
-        apiyi_status=apiyi_status,
+        apiyi_status=_provider_status_context(service),
+        candidate_costs=_candidate_costs(record),
     )
 
 
@@ -368,15 +389,24 @@ async def generate_live(
     confirm_paid_generation: Annotated[bool, Form()] = False,
     csrf_token: str = Form(...),
     username: str = Depends(get_current_username),
-) -> RedirectResponse:
+) -> RedirectResponse | HTMLResponse:
     """The UI can create only one explicitly-confirmed live Shot job."""
     validate_csrf_token(request, csrf_token)
     service = _service(request)
-    job = service.create_generation_job(
-        project_id, plan_id, mode="live", provider="apiyi", model=model, shot_id=shot_id,
-        budget_policy=BudgetPolicy(project_limit=max_cost, job_limit=max_cost, shot_limit=max_cost),
-        paid_confirmation=confirm_paid_generation, confirmed_by=username,
-    )
+    try:
+        job = service.create_generation_job(
+            project_id, plan_id, mode="live", provider="apiyi", model=model, shot_id=shot_id,
+            budget_policy=BudgetPolicy(project_limit=max_cost, job_limit=max_cost, shot_limit=max_cost),
+            paid_confirmation=confirm_paid_generation, confirmed_by=username,
+        )
+    except (KeyError, ValueError) as exc:
+        record = service.get_record(project_id)
+        return _view(
+            request, "studio_generation.html", record=record, user=username,
+            error=str(exc.args[0]) if isinstance(exc, KeyError) and exc.args else str(exc),
+            apiyi_status=_provider_status_context(service),
+            candidate_costs=_candidate_costs(record),
+        )
     background_tasks.add_task(service.run_apiyi_generation_job, project_id, job.id)
     return RedirectResponse(f"/studio/{project_id}/generation", status_code=status.HTTP_303_SEE_OTHER)
 
