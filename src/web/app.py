@@ -1,22 +1,44 @@
 """FastAPI application for TEMU Image Factory Web UI."""
 from __future__ import annotations
 
-import os
+import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from src.core.config import AppConfig, get_config
 from src.utils.secrets import mask_message
-from src.web.auth import add_session_middleware, get_current_username
+from src.web.auth import add_session_middleware
 from src.web.routes import api, pages, studio, upload
 
 
 def create_app(config: AppConfig | None = None) -> FastAPI:
-    app = FastAPI(title="TEMU Image Factory", version="0.1.0")
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        # Durable state is recovered before accepting requests.  Only offline
+        # Mock QUEUED work is safely re-dispatched; interrupted work is never
+        # blindly resent, and a future Live provider must reconcile explicitly.
+        from src.studio.service import StudioService
+
+        service = StudioService(app.state.config)
+        pending = service.recover_pending_mock_jobs()
+        tasks = [
+            asyncio.create_task(asyncio.to_thread(service.run_generation_job, project_id, job_id))
+            for project_id, job_id in pending
+        ]
+        app.state.studio_recovery_tasks = tasks
+        try:
+            yield
+        finally:
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+    app = FastAPI(title="TEMU Image Factory", version="0.1.0", lifespan=lifespan)
     add_session_middleware(app)
 
     templates_dir = Path(__file__).parent / "templates"

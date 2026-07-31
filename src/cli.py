@@ -63,7 +63,7 @@ def build(ctx: click.Context, sku: str, platform: str, model: str | None) -> Non
         click.echo(f"Build complete: {sku}/{platform}")
         click.echo(f"Estimated cost: ${manifest.total_estimated_cost_usd:.4f}")
         click.echo(f"Output: {sku_output_path(sku, platform)}")
-    except Exception as e:
+    except (KeyError, OSError, RuntimeError, ValueError) as e:
         click.echo(f"Build failed: {e}", err=True)
         sys.exit(1)
 
@@ -119,7 +119,7 @@ def generate(
         click.echo(json.dumps(task_manifest.model_dump(mode="json"), indent=2, ensure_ascii=False))
         if task_manifest.status == "failed":
             sys.exit(1)
-    except Exception as e:
+    except (KeyError, OSError, RuntimeError, ValueError) as e:
         click.echo(f"Generate failed: {e}", err=True)
         sys.exit(1)
 
@@ -137,7 +137,7 @@ def accept(ctx: click.Context, sku: str, task: str, candidate: int, platform: st
     try:
         dest = pipeline.accept_candidate(sku, platform, task, candidate)
         click.echo(f"Accepted candidate {candidate} -> {dest}")
-    except Exception as e:
+    except (KeyError, OSError, RuntimeError, ValueError) as e:
         click.echo(f"Accept failed: {e}", err=True)
         sys.exit(1)
 
@@ -305,8 +305,8 @@ def studio_generate_live(
     confirm_paid_generation: bool,
 ) -> None:
     """Reserved paid interface; M2A safely rejects unverified APIYI Studio calls."""
-    if max_cost < 0:
-        raise click.UsageError("--max-cost must be non-negative")
+    if max_cost <= 0:
+        raise click.UsageError("--max-cost must be greater than zero")
     from src.studio.models import BudgetPolicy
 
     service = StudioService(ctx.obj["config"])
@@ -364,7 +364,6 @@ def studio_reject_candidate(ctx: click.Context, project_id: str, candidate_id: s
 @cli.group()
 def auth() -> None:
     """Authentication utilities."""
-    pass
 
 
 @auth.command("hash-password")

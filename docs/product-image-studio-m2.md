@@ -27,8 +27,13 @@ Shot Plans transition `draft -> confirmed`; upstream asset/spec/style changes
 make plans and prompt packages `stale`. Blocking product-spec conflicts or
 missing full front/back clean own-capture references produce `blocked` plans.
 Attempts transition `queued -> running -> succeeded|failed|interrupted` and
-Jobs are terminal only after all their attempts reach terminal states. Restart
-recovery turns `running` attempts into `interrupted`; it never resends them.
+Jobs are terminal only after all their attempts reach terminal states. At app
+startup, every persisted `running` attempt is marked `interrupted`; it is never
+resent. Persisted Mock `queued` attempts are then safely re-dispatched by the
+bounded local executor. The per-project POSIX lock and persisted claim make
+this safe when more than one app worker observes startup recovery. Future Live
+requests remain interrupted/unknown until an explicit provider reconciliation
+interface is implemented; they are never automatically resent.
 
 ## Planning, prompts, and references
 
@@ -79,9 +84,10 @@ project only.
 
 `tif studio` shares `StudioService` for plan/prompt/preview/mock generation,
 jobs, candidates, accept and reject. Web POST creates a durable Job then uses
-the bounded local executor as a background task; claim fields prevent two
-executors from taking the same Attempt. There is no queue, automatic retry, or
-M3 visual QA/repair.
+the bounded local executor as an immediate background trigger; startup
+recovery closes the response-before-BackgroundTask gap. Persisted claims
+prevent two executors from taking the same Attempt. There is no external queue,
+automatic Live retry, or M3 visual QA/repair.
 
 ## Non-goals, acceptance, and M3 seam
 

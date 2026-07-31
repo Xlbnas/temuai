@@ -41,6 +41,12 @@ class StudioStore:
                 continue
         return sorted(projects, key=lambda project: project.updated_at, reverse=True)
 
+    def project_ids(self) -> list[str]:
+        """Return only valid project directory names for startup recovery."""
+        if not self.root.exists():
+            return []
+        return sorted(path.parent.name for path in self.root.glob("*/project.json"))
+
     def load(self, project_id: str) -> StudioRecord:
         path = self.record_path(project_id)
         if not path.exists():

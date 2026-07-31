@@ -361,6 +361,8 @@ class GenerationJob(BaseModel):
     started_at: str | None = None
     finished_at: str | None = None
     error_summary: str | None = None
+    generation_intent: str = "initial"
+    confirmed_by: str | None = None
 
 
 class GenerationAttempt(BaseModel):
@@ -382,6 +384,9 @@ class GenerationAttempt(BaseModel):
     finished_at: str | None = None
     error_code: str | None = None
     error_message_safe: str | None = None
+    generation_intent: str = "initial"
+    generation_nonce: str | None = None
+    confirmed_by: str | None = None
 
 
 class Candidate(BaseModel):

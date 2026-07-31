@@ -16,9 +16,11 @@ from typing import Any
 from PIL import Image, ImageDraw
 
 from src.studio.models import (
+    Asset,
     BudgetPolicy,
     ContentKind,
     GenerationAttempt,
+    Importance,
     PromptPackage,
     ProviderCapability,
     ShotSpec,
@@ -39,7 +41,7 @@ def default_shots(platform: StudioPlatform, pack: StylePack) -> list[ShotSpec]:
         definitions = [
             ("temu_hero", "Hero product", "Clear product-first catalog image", "full front"),
             ("temu_model_full_front", "Model full front", "Show fit from the front", "full body front"),
-            ("temu_model_half_front", "Model half front", "Show upper product details", "half body front"),
+            ("temu_model_half_front", "Model half front detail", "Show upper product details", "half body front"),
             ("temu_model_full_back", "Model full back", "Verify back construction", "full body back"),
             ("temu_outdoor_commercial", "Commercial lifestyle", "Product-led outdoor context", "full product"),
         ]
@@ -86,7 +88,11 @@ def blocking_reasons(record: StudioRecord) -> list[str]:
     if record.product_spec is None:
         return ["Canonical Product Spec must be compiled and confirmed before planning."]
     reasons: list[str] = []
-    conflicts = [fact.key for fact in record.product_spec.facts if fact.status != "strong"]
+    conflicts = [
+        fact.key
+        for fact in record.product_spec.facts
+        if fact.status != "strong" and fact.priority in {Importance.CRITICAL, Importance.HIGH}
+    ]
     if conflicts:
         reasons.append(f"Product Spec has unresolved facts: {', '.join(sorted(set(conflicts)))}.")
     analyses = {item.asset_id: item for item in record.analyses}
@@ -124,32 +130,57 @@ def select_references(
         [item for item in own if analyses[item.id].content_kind.effective_value in {ContentKind.PRODUCT_FULL_FRONT, ContentKind.PRODUCT_FULL_BACK}],
         key=lambda item: rank(item.id),
     )
+    required_keys = set(shot.required_fact_keys)
     details = sorted(
-        [item for item in own if analyses[item.id].content_kind.effective_value == ContentKind.DETAIL],
-        key=lambda item: (-(item.width * item.height), item.sha256),
+        [
+            item
+            for item in own
+            if analyses[item.id].content_kind.effective_value == ContentKind.DETAIL
+            and (
+                not required_keys
+                or any(
+                    region.detail_type.effective_value in required_keys
+                    for region in analyses[item.id].detail_regions
+                )
+            )
+        ],
+        key=lambda item: (-(item.width * item.height), item.sha256, item.id),
     )
     style = sorted(
         [item for item in record.assets if item.id in analyses and analyses[item.id].source_kind.effective_value.value == "competitor_reference"],
         key=lambda item: (item.sha256, item.id),
     )
-    dedupe: set[str] = set()
     selected: dict[str, list[str]] = {"product": [], "detail": [], "style": [], "annotation": []}
-    for label, candidates in (("product", product), ("detail", details), ("style", style)):
-        for asset in candidates:
+    # Preserve a clean primary product reference first.  With more capacity,
+    # a required detail and one style reference each receive a deliberate slot
+    # before secondary product images are considered.
+    candidates: dict[str, list[Asset]] = {"product": product, "detail": details, "style": style}
+    dedupe: set[str] = set()
+
+    def take(label: str) -> bool:
+        for asset in candidates[label]:
             if asset.sha256 not in dedupe:
                 dedupe.add(asset.sha256)
                 selected[label].append(asset.id)
+                return True
+        return False
+
     selected["annotation"] = [
         asset.id for asset in own if asset.annotation_path and asset.id not in selected["product"]
     ]
     limit = capability.max_reference_images
-    if limit <= 0:
-        selected["product"], selected["detail"], selected["style"] = [], [], []
-    else:
-        flattened = selected["product"] + selected["detail"] + selected["style"]
-        retained = set(flattened[:limit])
-        for label in ("product", "detail", "style"):
-            selected[label] = [asset_id for asset_id in selected[label] if asset_id in retained]
+    if limit > 0:
+        take("product")
+        # At capacity two, product plus a critical requested detail takes
+        # precedence; otherwise reserve the second slot for style.
+        if len(dedupe) < limit and (not details or limit >= 3):
+            take("style")
+        if len(dedupe) < limit:
+            take("detail")
+        if len(dedupe) < limit:
+            take("style")
+        while len(dedupe) < limit and (take("product") or take("detail") or take("style")):
+            pass
     return selected
 
 
@@ -228,13 +259,15 @@ class MockImageGenerationProvider:
 
 
 def safe_error(exc: Exception) -> tuple[str, str]:
-    text = str(exc)
-    text = re.sub(
-        r"(?i)(authorization\s*[:=]\s*(?:bearer\s+)?)(\S+)", r"\1[redacted]", text
-    )
-    text = re.sub(r"(?i)(api[_-]?key\s*[:=]\s*)(\S+)", r"\1[redacted]", text)
-    text = text[:300]
-    return ("provider_error", text)
+    """Keep provider diagnostics useful without trying to sanitize every secret."""
+    text = " ".join(str(exc).split())
+    if re.search(
+        r"(?i)(authorization|api[_-]?key|access[_-]?token|token|secret|password|bearer|"
+        r"https?://[^\s/@]+:[^\s/@]+@|base64)",
+        text,
+    ):
+        return ("provider_error", "Provider request failed; sensitive provider details were withheld.")
+    return ("provider_error", text[:300] or "Provider request failed.")
 
 
 def default_budget_policy() -> BudgetPolicy:

@@ -627,6 +627,11 @@ class StudioService:
             plan = self._shot_plan(record, plan_id)
             if plan.status == PlanStatus.CONFIRMED:
                 raise ValueError("A confirmed Shot Plan cannot be edited; compile a replacement")
+            if {shot.id for shot in shots} != {shot.id for shot in plan.shots}:
+                raise ValueError("Shot Plan updates must not add or remove shots")
+            sequences = [shot.sequence for shot in shots]
+            if sorted(sequences) != list(range(1, len(shots) + 1)):
+                raise ValueError("Shot sequences must be unique and contiguous")
             pack = record.project.selected_style_pack
             if pack is None:
                 raise ValueError("Style Pack is missing")
@@ -641,6 +646,54 @@ class StudioService:
             record.project.updated_at = utc_now()
             self.store.save(record)
             return plan
+
+    def update_single_shot(
+        self,
+        project_id: str,
+        plan_id: str,
+        shot_id: str,
+        *,
+        sequence: int,
+        composition: str,
+        user_instruction: str,
+        enabled: bool,
+    ) -> ShotPlan:
+        """Atomically edit one draft shot without replacing a stale shot list."""
+        with self.store.lock(project_id):
+            record = self.store.load(project_id)
+            plan = self._shot_plan(record, plan_id)
+            if plan.status == PlanStatus.CONFIRMED:
+                raise ValueError("A confirmed Shot Plan cannot be edited; compile a replacement")
+            if not 1 <= sequence <= len(plan.shots):
+                raise ValueError("Shot sequence is outside the plan range")
+            shot = next((item for item in plan.shots if item.id == shot_id), None)
+            if shot is None:
+                raise KeyError("Shot not found")
+            shot.composition = self._required_text(composition, "Composition")
+            shot.user_instruction = self._optional_text(user_instruction, "Instruction")
+            shot.enabled = enabled
+            ordered = sorted((item for item in plan.shots if item.id != shot_id), key=lambda item: item.sequence)
+            ordered.insert(sequence - 1, shot)
+            for index, item in enumerate(ordered, 1):
+                item.sequence = index
+            plan.shots = ordered
+            self._refresh_plan_after_edit(record, plan)
+            self.store.save(record)
+            return plan
+
+    def _refresh_plan_after_edit(self, record: StudioRecord, plan: ShotPlan) -> None:
+        pack = record.project.selected_style_pack
+        if pack is None:
+            raise ValueError("Style Pack is missing")
+        plan.blocking_reasons = blocking_reasons(record)
+        plan.status = PlanStatus.BLOCKED if plan.blocking_reasons else PlanStatus.DRAFT
+        plan.content_hash = plan_hash(record, plan.shots, pack)
+        plan.updated_at = utc_now()
+        shot_ids = {shot.id for shot in plan.shots}
+        for package in record.prompt_packages:
+            if package.shot_id in shot_ids:
+                package.stale = True
+        record.project.updated_at = utc_now()
 
     def confirm_shot_plan(self, project_id: str, plan_id: str, confirmed_by: str) -> ShotPlan:
         with self.store.lock(project_id):
@@ -688,9 +741,15 @@ class StudioService:
         budget_policy: BudgetPolicy | None = None,
         shot_id: str | None = None,
         paid_confirmation: bool = False,
+        manual_regeneration: bool = False,
+        confirmed_by: str | None = None,
+        generation_nonce: str | None = None,
     ) -> GenerationJob:
         if mode != "mock":
             # LIVE_GENERATION_ENABLED deliberately defaults false even when a key exists.
+            live_policy = budget_policy or default_budget_policy()
+            if live_policy.job_limit is None or live_policy.job_limit <= 0:
+                raise ValueError("Live generation requires a positive max cost")
             if self.config.safe_env("LIVE_GENERATION_ENABLED", "false").lower() != "true":
                 raise ValueError("Live generation is disabled by LIVE_GENERATION_ENABLED=false")
             if provider != "apiyi" or not paid_confirmation:
@@ -713,26 +772,27 @@ class StudioService:
             missing = shot_ids - packages.keys()
             if missing:
                 raise ValueError("Compile current Prompt Packages before generation")
+            if manual_regeneration and not confirmed_by:
+                raise ValueError("Manual regeneration requires an explicit confirmed_by value")
+            intent = "manual_regeneration" if manual_regeneration else "initial"
+            nonce = generation_nonce or (new_id() if manual_regeneration else None)
             policy = budget_policy or default_budget_policy()
             job = GenerationJob(
                 project_id=project_id, shot_plan_id=plan_id, mode="mock", provider="mock", model=model,
                 budget_policy=policy, estimated_total_cost=0.0, reserved_cost=0.0, confirmed_at=utc_now(),
+                generation_intent=intent, confirmed_by=confirmed_by,
             )
-            record.generation_jobs.append(job)
             for shot in selected_shots:
                 current_shot_id = shot.id
                 package = packages[current_shot_id]
                 previous = [item for item in record.generation_attempts if item.shot_id == current_shot_id]
                 number = max((item.attempt_number for item in previous), default=0) + 1
-                request_hash = stable_hash({"package": package.content_hash, "mode": "mock"})
-                if any(
-                    item.request_hash == request_hash
-                    and item.status in {
-                        GenerationStatus.QUEUED,
-                        GenerationStatus.RUNNING,
-                        GenerationStatus.SUCCEEDED,
-                    }
-                    for item in record.generation_attempts
+                request_hash = self._request_hash(record, shot, package, "mock", "mock", model, nonce)
+                same_request = [item for item in record.generation_attempts if item.request_hash == request_hash]
+                if any(item.status in {GenerationStatus.QUEUED, GenerationStatus.RUNNING} for item in same_request):
+                    raise ValueError("An identical request is already queued, running, or has succeeded")
+                if not manual_regeneration and any(
+                    item.status == GenerationStatus.SUCCEEDED for item in same_request
                 ):
                     raise ValueError("An identical request is already queued, running, or has succeeded")
                 attempt = GenerationAttempt(
@@ -740,8 +800,10 @@ class StudioService:
                     request_hash=request_hash, prompt_package_id=package.id,
                     reference_asset_ids=package.product_reference_ids + package.detail_reference_ids + package.style_reference_ids,
                     estimated_cost=0.0, idempotency_key=stable_hash({"job": job.id, "shot": current_shot_id}),
+                    generation_intent=intent, generation_nonce=nonce, confirmed_by=confirmed_by,
                 )
                 record.generation_attempts.append(attempt)
+            record.generation_jobs.append(job)
             record.project.updated_at = utc_now()
             self.store.save(record)
             return job
@@ -756,19 +818,24 @@ class StudioService:
                 attempts = [item for item in record.generation_attempts if item.job_id == job_id]
                 next_attempt = next((item for item in attempts if item.status == GenerationStatus.QUEUED), None)
                 if next_attempt is None:
-                    terminal = [item.status for item in attempts]
-                    job.status = GenerationStatus.SUCCEEDED if all(state == GenerationStatus.SUCCEEDED for state in terminal) else GenerationStatus.FAILED
-                    job.finished_at = utc_now()
-                    job.actual_total_cost = 0.0
+                    self._refresh_job_status(job, attempts)
                     self.store.save(record)
                     return job
+                plan = self._shot_plan(record, job.shot_plan_id)
+                package = self._prompt_package(record, next_attempt.prompt_package_id)
+                if plan.status != PlanStatus.CONFIRMED or package.stale:
+                    next_attempt.status = GenerationStatus.FAILED
+                    next_attempt.error_code = "stale_prompt"
+                    next_attempt.error_message_safe = "Prompt or Shot Plan became stale before dispatch."
+                    next_attempt.finished_at = utc_now()
+                    self.store.save(record)
+                    continue
                 next_attempt.status = GenerationStatus.RUNNING
                 next_attempt.claimed_at = next_attempt.started_at = utc_now()
                 job.status = GenerationStatus.RUNNING
                 job.started_at = job.started_at or utc_now()
                 self.store.save(record)
                 shot = self._shot_by_id(record, next_attempt.shot_id)
-                package = self._prompt_package(record, next_attempt.prompt_package_id)
             try:
                 if fail_shot_id == next_attempt.shot_id:
                     raise RuntimeError("Simulated M2 mock failure")
@@ -776,12 +843,19 @@ class StudioService:
                 with self.store.lock(project_id):
                     record = self.store.load(project_id)
                     attempt = self._attempt(record, next_attempt.id)
-                    self._persist_candidate(record, project_id, shot, attempt, content)
+                    if attempt.status != GenerationStatus.RUNNING:
+                        continue
+                    candidate = self._persist_candidate(record, project_id, shot, attempt, content)
                     attempt.provider_request_id = f"mock-{attempt.idempotency_key[:16]}"
                     attempt.actual_cost = 0.0
                     attempt.status = GenerationStatus.SUCCEEDED
                     attempt.finished_at = utc_now()
-                    self.store.save(record)
+                    try:
+                        self.store.save(record)
+                    except BaseException:
+                        record.candidates = [item for item in record.candidates if item.id != candidate.id]
+                        self._project_path(project_id, candidate.stored_path).unlink(missing_ok=True)
+                        raise
             except (OSError, RuntimeError, ValueError) as exc:
                 code, message = safe_error(exc)
                 with self.store.lock(project_id):
@@ -805,12 +879,39 @@ class StudioService:
                     attempt.error_message_safe = "Recovered after process interruption; no automatic resend."
                     changed += 1
             for job in record.generation_jobs:
-                if job.status == GenerationStatus.RUNNING:
-                    job.status = GenerationStatus.INTERRUPTED
-                    job.finished_at = utc_now()
-            if changed:
+                attempts = [item for item in record.generation_attempts if item.job_id == job.id]
+                if any(item.status == GenerationStatus.QUEUED for item in attempts) and job.mode == "mock":
+                    job.status = GenerationStatus.QUEUED
+                    job.finished_at = None
+                elif job.status == GenerationStatus.RUNNING or changed:
+                    self._refresh_job_status(job, attempts)
+            if changed or any(job.status == GenerationStatus.QUEUED for job in record.generation_jobs):
                 self.store.save(record)
             return changed
+
+    def recover_pending_mock_jobs(self) -> list[tuple[str, str]]:
+        """Startup recovery: only durable Mock QUEUED work may be rescheduled."""
+        pending: list[tuple[str, str]] = []
+        for project_id in self.store.project_ids():
+            self.recover_interrupted_jobs(project_id)
+            with self.store.lock(project_id):
+                record = self.store.load(project_id)
+                for job in record.generation_jobs:
+                    if job.mode == "mock" and any(
+                        attempt.job_id == job.id and attempt.status == GenerationStatus.QUEUED
+                        for attempt in record.generation_attempts
+                    ):
+                        pending.append((project_id, job.id))
+        return pending
+
+    def resume_generation_job(self, project_id: str, job_id: str) -> GenerationJob:
+        """Explicit recovery seam; Live attempts require future provider reconciliation."""
+        with self.store.lock(project_id):
+            record = self.store.load(project_id)
+            job = self._generation_job(record, job_id)
+            if job.mode != "mock":
+                raise ValueError("Live generation requires explicit provider reconciliation and is not resumable")
+        return self.run_generation_job(project_id, job_id)
 
     def accept_candidate(self, project_id: str, candidate_id: str) -> Candidate:
         with self.store.lock(project_id):
@@ -855,6 +956,8 @@ class StudioService:
         content: bytes,
     ) -> Candidate:
         """Decode provider bytes before storage; never trust a supplied MIME or filename."""
+        if any(candidate.attempt_id == attempt.id for candidate in record.candidates):
+            raise ValueError("A successful attempt may persist only one Candidate")
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("error", Image.DecompressionBombWarning)
@@ -864,7 +967,8 @@ class StudioService:
                         raise ValueError("Animated or multi-frame candidate images are not supported")
                     image.verify()
                 with Image.open(BytesIO(content)) as image:
-                    width, height = image.size
+                    normalized = ImageOps.exif_transpose(image).convert("RGB")
+                    width, height = normalized.size
         except (
             Image.DecompressionBombError,
             Image.DecompressionBombWarning,
@@ -877,10 +981,16 @@ class StudioService:
         if width > MAX_IMAGE_DIMENSION or height > MAX_IMAGE_DIMENSION or width * height > MAX_IMAGE_PIXELS:
             raise ValueError("Candidate dimensions exceed limits")
         mime_type, extension = ALLOWED_FORMATS[image_format]
-        digest = hashlib.sha256(content).hexdigest()
+        # Persist only a freshly encoded bitmap.  This removes source EXIF,
+        # ICC and trailing bytes accepted by decoders while retaining the
+        # verified image format recorded in the Candidate metadata.
+        output = BytesIO()
+        normalized.save(output, format=image_format)
+        canonical_content = output.getvalue()
+        digest = hashlib.sha256(canonical_content).hexdigest()
         relative = f"generation/candidates/{attempt.id}/{new_id()}{extension}"
         path = self._project_path(project_id, relative)
-        self._atomic_bytes(path, content)
+        self._atomic_bytes(path, canonical_content)
         candidate = Candidate(
             project_id=project_id,
             shot_id=shot.id,
@@ -893,6 +1003,61 @@ class StudioService:
         )
         record.candidates.append(candidate)
         return candidate
+
+    @staticmethod
+    def _refresh_job_status(job: GenerationJob, attempts: list[GenerationAttempt]) -> None:
+        statuses = [attempt.status for attempt in attempts]
+        if any(status == GenerationStatus.RUNNING for status in statuses):
+            job.status = GenerationStatus.RUNNING
+            job.finished_at = None
+            return
+        if any(status == GenerationStatus.QUEUED for status in statuses):
+            job.status = GenerationStatus.QUEUED
+            job.finished_at = None
+            return
+        if statuses and all(status == GenerationStatus.SUCCEEDED for status in statuses):
+            job.status = GenerationStatus.SUCCEEDED
+        elif GenerationStatus.INTERRUPTED in statuses:
+            job.status = GenerationStatus.INTERRUPTED
+        else:
+            job.status = GenerationStatus.FAILED
+        job.finished_at = utc_now()
+        costs = [attempt.actual_cost for attempt in attempts]
+        job.actual_total_cost = sum(cost for cost in costs if cost is not None)
+
+    @staticmethod
+    def _request_hash(
+        record: StudioRecord,
+        shot: ShotSpec,
+        package: PromptPackage,
+        mode: str,
+        provider: str,
+        model: str,
+        generation_nonce: str | None,
+    ) -> str:
+        assets = {asset.id: asset for asset in record.assets}
+        references: list[dict[str, str]] = []
+        for role, asset_ids in (
+            ("product", package.product_reference_ids),
+            ("detail", package.detail_reference_ids),
+            ("style", package.style_reference_ids),
+        ):
+            references.extend(
+                {"role": role, "sha256": assets[asset_id].sha256}
+                for asset_id in asset_ids
+                if asset_id in assets
+            )
+        return stable_hash(
+            {
+                "prompt_package": package.content_hash,
+                "provider": provider,
+                "model": model,
+                "mode": mode,
+                "output": {"width": shot.width, "height": shot.height, "aspect_ratio": shot.aspect_ratio},
+                "references": references,
+                "generation_nonce": generation_nonce,
+            }
+        )
 
     @staticmethod
     def _invalidate_spec(record: StudioRecord) -> None:
@@ -913,6 +1078,13 @@ class StudioService:
         cleaned = value.strip()
         if not cleaned or len(cleaned) > 200:
             raise ValueError(f"{field_name} must contain between 1 and 200 characters")
+        return cleaned
+
+    @staticmethod
+    def _optional_text(value: str, field_name: str) -> str:
+        cleaned = value.strip()
+        if len(cleaned) > 200:
+            raise ValueError(f"{field_name} must contain at most 200 characters")
         return cleaned
 
     @staticmethod
