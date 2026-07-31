@@ -4,7 +4,17 @@ from __future__ import annotations
 
 from typing import Annotated, Any, cast
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Request,
+    UploadFile,
+    status,
+)
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
 from src.studio.analyzers import MockAssetAnalyzer
@@ -248,3 +258,154 @@ async def reference_board(
         return FileResponse(_service(request).reference_board_path(project_id))
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Reference board not found")
+
+
+@router.get("/studio/{project_id}/generation", response_class=HTMLResponse)
+async def generation_page(
+    request: Request, project_id: str, username: str = Depends(get_current_username)
+) -> HTMLResponse:
+    try:
+        record = _service(request).get_record(project_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Studio project not found")
+    return _view(request, "studio_generation.html", record=record, user=username, error=None)
+
+
+@router.post("/studio/{project_id}/plans", response_model=None)
+async def compile_plan(
+    request: Request, project_id: str, csrf_token: str = Form(...), username: str = Depends(get_current_username)
+) -> RedirectResponse:
+    validate_csrf_token(request, csrf_token)
+    _service(request).compile_shot_plan(project_id)
+    return RedirectResponse(f"/studio/{project_id}/generation", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@router.post("/studio/{project_id}/plans/{plan_id}/shots/{shot_id}", response_model=None)
+async def edit_shot(
+    request: Request,
+    project_id: str,
+    plan_id: str,
+    shot_id: str,
+    sequence: int = Form(...),
+    composition: str = Form(...),
+    user_instruction: str = Form(""),
+    enabled: Annotated[bool, Form()] = False,
+    csrf_token: str = Form(...),
+    username: str = Depends(get_current_username),
+) -> RedirectResponse:
+    validate_csrf_token(request, csrf_token)
+    _service(request).update_single_shot(
+        project_id,
+        plan_id,
+        shot_id,
+        sequence=sequence,
+        composition=composition,
+        user_instruction=user_instruction,
+        enabled=enabled,
+    )
+    return RedirectResponse(f"/studio/{project_id}/generation", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@router.post("/studio/{project_id}/plans/{plan_id}/confirm", response_model=None)
+async def confirm_plan(
+    request: Request, project_id: str, plan_id: str, csrf_token: str = Form(...), username: str = Depends(get_current_username)
+) -> RedirectResponse:
+    validate_csrf_token(request, csrf_token)
+    _service(request).confirm_shot_plan(project_id, plan_id, username)
+    return RedirectResponse(f"/studio/{project_id}/generation", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@router.post("/studio/{project_id}/plans/{plan_id}/prompts", response_model=None)
+async def compile_prompts(
+    request: Request, project_id: str, plan_id: str, csrf_token: str = Form(...), username: str = Depends(get_current_username)
+) -> RedirectResponse:
+    validate_csrf_token(request, csrf_token)
+    _service(request).compile_prompt_packages(project_id, plan_id)
+    return RedirectResponse(f"/studio/{project_id}/generation", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@router.post("/studio/{project_id}/plans/{plan_id}/generate/mock", response_model=None)
+async def generate_mock(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    project_id: str,
+    plan_id: str,
+    csrf_token: str = Form(...),
+    username: str = Depends(get_current_username),
+) -> RedirectResponse:
+    validate_csrf_token(request, csrf_token)
+    service = _service(request)
+    job = service.create_generation_job(project_id, plan_id, mode="mock")
+    # The request only creates durable work; the bounded local executor claims it after response.
+    background_tasks.add_task(service.run_generation_job, project_id, job.id)
+    return RedirectResponse(f"/studio/{project_id}/generation", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@router.post("/studio/{project_id}/candidates/{candidate_id}/accept", response_model=None)
+async def accept_generation_candidate(
+    request: Request, project_id: str, candidate_id: str, csrf_token: str = Form(...), username: str = Depends(get_current_username)
+) -> RedirectResponse:
+    validate_csrf_token(request, csrf_token)
+    _service(request).accept_candidate(project_id, candidate_id)
+    return RedirectResponse(f"/studio/{project_id}/generation", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@router.post("/studio/{project_id}/candidates/{candidate_id}/reject", response_model=None)
+async def reject_generation_candidate(
+    request: Request, project_id: str, candidate_id: str, reason: str = Form(...), csrf_token: str = Form(...), username: str = Depends(get_current_username)
+) -> RedirectResponse:
+    validate_csrf_token(request, csrf_token)
+    _service(request).reject_candidate(project_id, candidate_id, reason)
+    return RedirectResponse(f"/studio/{project_id}/generation", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@router.post("/studio/{project_id}/candidates/{candidate_id}/regenerate/mock", response_model=None)
+async def regenerate_mock_candidate(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    project_id: str,
+    candidate_id: str,
+    confirm_regeneration: Annotated[bool, Form()] = False,
+    csrf_token: str = Form(...),
+    username: str = Depends(get_current_username),
+) -> RedirectResponse:
+    """A rejected Mock candidate may be explicitly regenerated as a new attempt."""
+    validate_csrf_token(request, csrf_token)
+    if not confirm_regeneration:
+        raise HTTPException(status_code=400, detail="Confirm manual regeneration before creating a new candidate")
+    service = _service(request)
+    record = service.get_record(project_id)
+    candidate = next((item for item in record.candidates if item.id == candidate_id), None)
+    if candidate is None or candidate.status.value != "rejected":
+        raise HTTPException(status_code=400, detail="Only rejected candidates can be manually regenerated")
+    attempt = next(item for item in record.generation_attempts if item.id == candidate.attempt_id)
+    prior_job = next(item for item in record.generation_jobs if item.id == attempt.job_id)
+    job = service.create_generation_job(
+        project_id,
+        prior_job.shot_plan_id,
+        shot_id=candidate.shot_id,
+        manual_regeneration=True,
+        confirmed_by=username,
+    )
+    background_tasks.add_task(service.run_generation_job, project_id, job.id)
+    # The direct task invocation remains the same FastAPI BackgroundTasks
+    # pattern as initial generation; durable startup recovery covers a crash
+    # after this response and before the task is executed.
+    return RedirectResponse(f"/studio/{project_id}/generation", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@router.get("/studio/{project_id}/candidates/{candidate_id}/image")
+async def candidate_image(
+    request: Request, project_id: str, candidate_id: str, username: str = Depends(get_current_username)
+) -> FileResponse:
+    try:
+        service = _service(request)
+        record = service.get_record(project_id)
+        candidate = next((item for item in record.candidates if item.id == candidate_id), None)
+        if candidate is None:
+            raise KeyError("Candidate not found")
+        return FileResponse(
+            service.resolve_candidate_path(project_id, candidate_id), media_type=candidate.mime_type
+        )
+    except (KeyError, FileNotFoundError):
+        raise HTTPException(status_code=404, detail="Studio candidate not found")

@@ -220,8 +220,188 @@ class StudioRecord(BaseModel):
     """Single atomically-written aggregate per Studio project."""
 
     model_config = ConfigDict(extra="forbid")
-    schema_version: int = 1
+    schema_version: int = 2
     project: StudioProject
     assets: list[Asset] = Field(default_factory=list)
     analyses: list[AssetAnalysis] = Field(default_factory=list)
     product_spec: CanonicalProductSpec | None = None
+    shot_plans: list[ShotPlan] = Field(default_factory=list)
+    prompt_packages: list[PromptPackage] = Field(default_factory=list)
+    generation_jobs: list[GenerationJob] = Field(default_factory=list)
+    generation_attempts: list[GenerationAttempt] = Field(default_factory=list)
+    candidates: list[Candidate] = Field(default_factory=list)
+
+
+# M2 generation entities intentionally remain in the Studio aggregate.  This
+# preserves project isolation and lets the existing atomic JSON/lock store be
+# used without adding a database or an external worker.
+class PlanStatus(str, Enum):
+    DRAFT = "draft"
+    CONFIRMED = "confirmed"
+    STALE = "stale"
+    BLOCKED = "blocked"
+
+
+class GenerationStatus(str, Enum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    INTERRUPTED = "interrupted"
+
+
+class CandidateStatus(str, Enum):
+    GENERATED = "generated"
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
+
+
+class ShotSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: str = Field(default_factory=new_id)
+    shot_type: str
+    title: str
+    purpose: str
+    aspect_ratio: str
+    width: int = Field(gt=0)
+    height: int = Field(gt=0)
+    composition: str
+    subject_requirements: list[str] = Field(default_factory=list)
+    required_fact_keys: list[str] = Field(default_factory=list)
+    forbidden_elements: list[str] = Field(default_factory=list)
+    reference_policy: str = "clean_product_and_detail"
+    user_instruction: str = ""
+    sequence: int = Field(ge=1)
+    enabled: bool = True
+
+
+class ShotPlan(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: str = Field(default_factory=new_id)
+    project_id: str
+    platform: StudioPlatform
+    style_pack_id: str
+    style_pack_version: str
+    product_spec_version: str
+    version: int = 1
+    status: PlanStatus = PlanStatus.DRAFT
+    shots: list[ShotSpec] = Field(default_factory=list)
+    content_hash: str
+    blocking_reasons: list[str] = Field(default_factory=list)
+    created_at: str = Field(default_factory=utc_now)
+    updated_at: str = Field(default_factory=utc_now)
+    confirmed_at: str | None = None
+    confirmed_by: str | None = None
+
+
+class PromptPackage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: str = Field(default_factory=new_id)
+    project_id: str
+    shot_id: str
+    compiler_name: str = "studio-prompt-compiler"
+    compiler_version: str = "m2a-1"
+    schema_version: str = "1"
+    rendered_prompt: str
+    negative_prompt: str
+    structured_product_facts: list[dict[str, str]] = Field(default_factory=list)
+    structured_style_rules: list[str] = Field(default_factory=list)
+    structured_composition: dict[str, str] = Field(default_factory=dict)
+    product_reference_ids: list[str] = Field(default_factory=list)
+    detail_reference_ids: list[str] = Field(default_factory=list)
+    style_reference_ids: list[str] = Field(default_factory=list)
+    annotation_preview_ids: list[str] = Field(default_factory=list)
+    content_hash: str
+    stale: bool = False
+    created_at: str = Field(default_factory=utc_now)
+
+
+class ProviderCapability(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    provider: str
+    model: str
+    supports_image_references: bool = False
+    supports_multiple_references: bool = False
+    max_reference_images: int = Field(default=0, ge=0)
+    supports_edit: bool = False
+    supports_mask: bool = False
+    supports_seed: bool = False
+    supports_negative_prompt: bool = True
+    supported_aspect_ratios: list[str] = Field(default_factory=list)
+    supported_output_sizes: list[str] = Field(default_factory=list)
+    pricing_version: str | None = None
+
+
+class BudgetPolicy(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    project_limit: float | None = Field(default=None, ge=0)
+    job_limit: float | None = Field(default=None, ge=0)
+    shot_limit: float | None = Field(default=None, ge=0)
+    currency: str = "USD"
+    require_confirmation: bool = True
+    pricing_version: str | None = None
+    allow_unknown_pricing: bool = False
+
+
+class GenerationJob(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: str = Field(default_factory=new_id)
+    project_id: str
+    shot_plan_id: str
+    status: GenerationStatus = GenerationStatus.QUEUED
+    mode: str = "mock"
+    provider: str
+    model: str
+    budget_policy: BudgetPolicy
+    estimated_total_cost: float | None = 0.0
+    reserved_cost: float | None = 0.0
+    actual_total_cost: float | None = None
+    created_at: str = Field(default_factory=utc_now)
+    confirmed_at: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+    error_summary: str | None = None
+    generation_intent: str = "initial"
+    confirmed_by: str | None = None
+
+
+class GenerationAttempt(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: str = Field(default_factory=new_id)
+    job_id: str
+    shot_id: str
+    attempt_number: int = Field(ge=1)
+    provider_request_id: str | None = None
+    status: GenerationStatus = GenerationStatus.QUEUED
+    request_hash: str
+    prompt_package_id: str
+    reference_asset_ids: list[str] = Field(default_factory=list)
+    estimated_cost: float | None = 0.0
+    actual_cost: float | None = None
+    idempotency_key: str
+    claimed_at: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+    error_code: str | None = None
+    error_message_safe: str | None = None
+    generation_intent: str = "initial"
+    generation_nonce: str | None = None
+    confirmed_by: str | None = None
+
+
+class Candidate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: str = Field(default_factory=new_id)
+    project_id: str
+    shot_id: str
+    attempt_id: str
+    stored_path: str
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    width: int = Field(gt=0)
+    height: int = Field(gt=0)
+    mime_type: str
+    status: CandidateStatus = CandidateStatus.GENERATED
+    created_at: str = Field(default_factory=utc_now)
+    accepted_at: str | None = None
+    rejected_at: str | None = None
+    rejection_reason: str | None = None

@@ -19,7 +19,7 @@ from src.utils.paths import resolve_within
 
 
 class StudioStore:
-    CURRENT_SCHEMA_VERSION = 1
+    CURRENT_SCHEMA_VERSION = 2
 
     def __init__(self, data_dir: Path) -> None:
         self.root = data_dir / "studio"
@@ -40,6 +40,12 @@ class StudioStore:
             except (OSError, ValueError):
                 continue
         return sorted(projects, key=lambda project: project.updated_at, reverse=True)
+
+    def project_ids(self) -> list[str]:
+        """Return only valid project directory names for startup recovery."""
+        if not self.root.exists():
+            return []
+        return sorted(path.parent.name for path in self.root.glob("*/project.json"))
 
     def load(self, project_id: str) -> StudioRecord:
         path = self.record_path(project_id)
@@ -89,7 +95,11 @@ class StudioStore:
     def _read_record(cls, path: Path) -> StudioRecord:
         payload = json.loads(path.read_text(encoding="utf-8"))
         version = payload.get("schema_version")
-        if version != cls.CURRENT_SCHEMA_VERSION:
+        if version == 1:
+            # M2 is an additive aggregate migration.  Keep old projects
+            # readable and upgrade them only when the next atomic save occurs.
+            payload["schema_version"] = cls.CURRENT_SCHEMA_VERSION
+        elif version != cls.CURRENT_SCHEMA_VERSION:
             raise ValueError(f"Unsupported Studio schema version: {version!r}")
         return StudioRecord.model_validate(payload)
 
