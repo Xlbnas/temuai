@@ -10,7 +10,8 @@
 # 注意:
 #   - gemini-3.1-flash-lite-image 是 Nano Banana 2 Lite 图片模型，
 #     不要与 gemini-3.1-flash-lite（文本/多模态理解模型）混淆。
-#   - gemini-3.1-flash-image-preview 已于 2026-06-25 停服, GA ID 为 gemini-3.1-flash-image。
+#   - Nano Banana 2 的 GA 正式模型名为 gemini-3.1-flash-image；APIYI 官方
+#     2026-05-29 公告：旧 -preview 名仍可用且价格不变（见 M2C 定价证据文档）。
 
 models:
   nano_banana_lite:
@@ -45,9 +46,30 @@ models:
     timeout: 360
     estimated_cost_mode: request
     estimated_cost_usd: 0.055
-    pricing_version: repository-estimate-2026-07
-    pricing_status: unknown
-    pricing_source: existing_repository_estimate_not_provider_verified
+    # M2C verified pricing contract (evidence: docs/product-image-studio-m2c-pricing.md).
+    # Flat triple below stays consistent with the contract for legacy readers.
+    pricing_version: apiyi-nb2-per-request-2026-03-01
+    pricing_status: exact
+    pricing_source: APIYI official docs center pricing page + GA naming changelog (docs/product-image-studio-m2c-pricing.md)
+    pricing_contract:
+      provider: apiyi
+      provider_model_id: gemini-3.1-flash-image
+      pricing_status: exact
+      pricing_version: apiyi-nb2-per-request-2026-03-01
+      pricing_source: docs.apiyi.com Nano Banana pricing overview + usage guide + changelog
+      source_type: public_official
+      effective_at: "2026-03-01"
+      retrieved_at: "2026-08-01T01:59:39Z"
+      currency: USD
+      unit: per_request
+      amount: 0.055
+      request_mode: generation_or_edit
+      supported_resolutions: ["512px", "1K", "2K", "4K"]
+      supported_aspect_ratios: ["1:1", "1:4", "4:1", "1:8", "8:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"]
+      supported_quality_levels: []
+      reference_policy: price_unchanged
+      output_count: 1
+      evidence_digest: "sha256:0c4dec06c0d2420f22d19d7183e9250c20f041ad955cf430faa2d421f467df0f"
     role: production
 
   gpt_image_2_vip:

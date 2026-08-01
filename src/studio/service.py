@@ -21,6 +21,8 @@ from src.studio.apiyi import (
     APIYIProviderError,
     APIYIProviderErrorCode,
     APIYIReference,
+    _model_config,
+    load_pricing_contract,
     safe_provider_error,
 )
 from src.studio.generation import (
@@ -640,13 +642,38 @@ class StudioService:
         if provider != "apiyi":
             raise ValueError("Only apiyi has a Studio live cost preview")
         capability = self.apiyi_capability(model)
-        return {
+        preview: dict[str, object] = {
             "provider": provider, "model": capability.model, "shot_id": shot_id,
+            "output_size": f"{shot.width}x{shot.height}", "aspect_ratio": shot.aspect_ratio,
+            "quantity": 1,
             "pricing_status": capability.pricing_status,
             "pricing_version": capability.pricing_version,
             "pricing_source": capability.pricing_source,
             "estimated_cost": capability.estimated_price_usd if capability.pricing_status != "unknown" else None,
+            "note": "Preview only — no provider call is made.",
         }
+        if capability.pricing_status != "exact":
+            # Never dress an unknown price up as a precise number.
+            preview["estimated_cost"] = None
+            preview["display"] = "Pricing unavailable / Live locked"
+            return preview
+        contract = load_pricing_contract(self.config, _model_config(self.config, model))
+        if contract is not None:
+            preview.update(
+                {
+                    "provider_model_id": contract.provider_model_id,
+                    "unit": contract.unit,
+                    "unit_price": contract.amount,
+                    "currency": contract.currency,
+                    "estimated_total": contract.amount,
+                    "effective_at": contract.effective_at,
+                    "request_mode": contract.request_mode,
+                    "reference_price_policy": contract.reference_policy,
+                    "hard_max_recommendation": round(contract.amount * 1.1, 4) if contract.amount else None,
+                    "pricing_digest": contract.evidence_digest,
+                }
+            )
+        return preview
 
     def compile_shot_plan(self, project_id: str) -> ShotPlan:
         with self.store.lock(project_id):
@@ -866,13 +893,19 @@ class StudioService:
                 project_id=project_id, shot_plan_id=plan_id, mode=mode, provider=provider, model=model,
                 budget_policy=policy, estimated_total_cost=estimated_total, reserved_cost=estimated_total, confirmed_at=utc_now(),
                 generation_intent=intent, confirmed_by=confirmed_by,
+                pricing_version=capability.pricing_version if capability else None,
+                pricing_digest=capability.pricing_digest if capability else None,
             )
             for shot in selected_shots:
                 current_shot_id = shot.id
                 package = packages[current_shot_id]
                 previous = [item for item in record.generation_attempts if item.shot_id == current_shot_id]
                 number = max((item.attempt_number for item in previous), default=0) + 1
-                request_hash = self._request_hash(record, shot, package, mode, provider, model, nonce)
+                request_hash = self._request_hash(
+                    record, shot, package, mode, provider, model, nonce,
+                    pricing_version=capability.pricing_version if capability else None,
+                    pricing_digest=capability.pricing_digest if capability else None,
+                )
                 same_request = [item for item in record.generation_attempts if item.request_hash == request_hash]
                 active_statuses = {
                     GenerationStatus.QUEUED, GenerationStatus.SUBMITTING, GenerationStatus.RUNNING,
@@ -894,6 +927,9 @@ class StudioService:
                     reference_asset_ids=package.product_reference_ids + package.detail_reference_ids + package.style_reference_ids,
                     estimated_cost=unit_cost, idempotency_key=request_hash,
                     generation_intent=intent, generation_nonce=nonce, confirmed_by=confirmed_by,
+                    pricing_version=capability.pricing_version if capability else None,
+                    pricing_digest=capability.pricing_digest if capability else None,
+                    unit_price_usd=unit_cost if mode == "live" else None,
                 )
                 attempt.reference_manifest = self._reference_manifest(record, package)
                 record.generation_attempts.append(attempt)
@@ -1285,6 +1321,8 @@ class StudioService:
         provider: str,
         model: str,
         generation_nonce: str | None,
+        pricing_version: str | None = None,
+        pricing_digest: str | None = None,
     ) -> str:
         assets = {asset.id: asset for asset in record.assets}
         references: list[dict[str, str]] = []
@@ -1298,17 +1336,20 @@ class StudioService:
                 for asset_id in asset_ids
                 if asset_id in assets
             )
-        return stable_hash(
-            {
-                "prompt_package": package.content_hash,
-                "provider": provider,
-                "model": model,
-                "mode": mode,
-                "output": {"width": shot.width, "height": shot.height, "aspect_ratio": shot.aspect_ratio},
-                "references": references,
-                "generation_nonce": generation_nonce,
-            }
-        )
+        payload: dict[str, object] = {
+            "prompt_package": package.content_hash,
+            "provider": provider,
+            "model": model,
+            "mode": mode,
+            "output": {"width": shot.width, "height": shot.height, "aspect_ratio": shot.aspect_ratio},
+            "references": references,
+            "generation_nonce": generation_nonce,
+        }
+        if pricing_version is not None:
+            # The verified pricing contract version/digest is part of the paid
+            # request identity; mock hashes (no contract) stay unchanged.
+            payload["pricing"] = {"version": pricing_version, "digest": pricing_digest}
+        return stable_hash(payload)
 
     def _reference_manifest(self, record: StudioRecord, package: PromptPackage) -> list[dict[str, str]]:
         assets = {asset.id: asset for asset in record.assets}
@@ -1359,6 +1400,7 @@ class StudioService:
             requested_size=f"{shot.width}x{shot.height}", aspect_ratio=shot.aspect_ratio,
             estimated_cost_usd=attempt.estimated_cost or 0.0, actual_cost_usd=attempt.actual_cost,
             status=status_value, accepted=False, error=attempt.error_code, duration_seconds=0.0,
+            pricing_version=attempt.pricing_version,
         )
 
     @staticmethod

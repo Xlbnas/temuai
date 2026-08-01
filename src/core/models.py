@@ -5,7 +5,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class TaskType(str, Enum):
@@ -84,6 +84,61 @@ class ModelCapabilities(BaseModel):
     mask: bool = False
     inpaint: bool = False
     upscale: bool = False
+
+
+class PricingContract(BaseModel):
+    """Versioned, evidence-backed pricing contract for one provider model.
+
+    ``pricing_status="exact"`` is only valid when every evidence field is
+    present; anything less stays ``unknown`` and can never unlock Live.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider: str
+    provider_model_id: str
+    pricing_status: str = "unknown"
+    pricing_version: str | None = None
+    pricing_source: str | None = None
+    source_type: str | None = None
+    effective_at: str | None = None
+    retrieved_at: str | None = None
+    currency: str = "USD"
+    unit: str | None = None
+    amount: float | None = Field(default=None, gt=0)
+    request_mode: str | None = None
+    supported_output_sizes: list[str] = Field(default_factory=list)
+    supported_resolutions: list[str] = Field(default_factory=list)
+    supported_aspect_ratios: list[str] = Field(default_factory=list)
+    supported_quality_levels: list[str] = Field(default_factory=list)
+    reference_policy: str | None = None
+    output_count: int = Field(default=1, ge=1)
+    evidence_digest: str | None = None
+    expires_at: str | None = None
+    revoked: bool = False
+
+    @model_validator(mode="after")
+    def exact_requires_full_evidence(self) -> PricingContract:
+        if self.pricing_status != "exact":
+            return self
+        missing = [
+            field
+            for field, value in (
+                ("pricing_version", self.pricing_version),
+                ("pricing_source", self.pricing_source),
+                ("source_type", self.source_type),
+                ("effective_at", self.effective_at),
+                ("retrieved_at", self.retrieved_at),
+                ("unit", self.unit),
+                ("amount", self.amount),
+                ("request_mode", self.request_mode),
+                ("evidence_digest", self.evidence_digest),
+            )
+            if value in (None, "")
+        ]
+        if missing:
+            raise ValueError(f"exact pricing contract is missing required evidence fields: {', '.join(missing)}")
+        return self
 
 
 class ModelConfig(BaseModel):

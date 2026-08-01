@@ -29,6 +29,7 @@ class CostRecord:
     accepted: bool
     error: str | None
     duration_seconds: float
+    pricing_version: str | None = None
 
 
 class CostLedger:
@@ -62,6 +63,7 @@ class CostLedger:
         accepted: bool,
         error: str | None,
         duration_seconds: float,
+        pricing_version: str | None = None,
     ) -> CostRecord:
         record = CostRecord(
             sku=safe_filename(sku),
@@ -81,6 +83,7 @@ class CostLedger:
             accepted=accepted,
             error=error,
             duration_seconds=duration_seconds,
+            pricing_version=pricing_version,
         )
         self.append(record)
         return record

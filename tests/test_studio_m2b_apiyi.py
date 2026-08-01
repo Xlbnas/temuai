@@ -79,9 +79,43 @@ def _fake_response(payload: dict, status: int = 200) -> httpx.Response:
 
 
 def _enable_live(temp_config: AppConfig, monkeypatch: pytest.MonkeyPatch, model: str = "nano_banana_2") -> None:
-    temp_config.models["models"][model]["pricing_status"] = "exact"
+    # The shipped nano_banana_2 pricing contract already provides exact pricing;
+    # env switches are the only thing Live still needs here.
     monkeypatch.setenv("LIVE_GENERATION_ENABLED", "true")
     monkeypatch.setenv("APIYI_API_KEY", "fixture-key")
+
+
+def _force_unknown_pricing(temp_config: AppConfig, model: str = "nano_banana_2") -> None:
+    """Pin a model to pricing-unknown regardless of any shipped pricing contract."""
+    raw = temp_config.models["models"][model]
+    raw.pop("pricing_contract", None)
+    raw["pricing_status"] = "unknown"
+
+
+def _force_exact_pricing(temp_config: AppConfig, model: str = "nano_banana_2") -> None:
+    """Restore an exact model with a full validated contract (flat flip is not enough)."""
+    raw = temp_config.models["models"][model]
+    raw["pricing_status"] = "exact"
+    raw["pricing_contract"] = {
+        "provider": "apiyi",
+        "provider_model_id": "gemini-3.1-flash-image",
+        "pricing_status": "exact",
+        "pricing_version": "fixture-exact-v1",
+        "pricing_source": "fixture official source",
+        "source_type": "public_official",
+        "effective_at": "2026-03-01",
+        "retrieved_at": "2026-08-01T00:00:00Z",
+        "currency": "USD",
+        "unit": "per_request",
+        "amount": 0.055,
+        "request_mode": "generation_or_edit",
+        "supported_resolutions": ["512px", "1K", "2K", "4K"],
+        "supported_aspect_ratios": ["3:4"],
+        "supported_quality_levels": [],
+        "reference_policy": "price_unchanged",
+        "output_count": 1,
+        "evidence_digest": "sha256:" + "0" * 64,
+    }
 
 
 def _live_job(service: StudioService, project, plan):
@@ -171,6 +205,7 @@ def test_transport_error_classification_matrix(
 def test_live_gate_rejects_unknown_pricing_even_with_key(
     temp_config: AppConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    _force_unknown_pricing(temp_config)
     service = StudioService(temp_config)
     project, plan = _confirmed_plan(service)
     monkeypatch.setenv("LIVE_GENERATION_ENABLED", "true")
@@ -188,7 +223,7 @@ def test_live_gate_matrix_blocks_every_missing_requirement(
 ) -> None:
     service = StudioService(temp_config)
     project, plan = _confirmed_plan(service)
-    temp_config.models["models"]["nano_banana_2"]["pricing_status"] = "exact"
+    _force_exact_pricing(temp_config)
     policy = BudgetPolicy(project_limit=999, job_limit=999, shot_limit=999)
     base = {
         "mode": "live", "provider": "apiyi", "model": "nano_banana_2", "shot_id": plan.shots[0].id,
@@ -467,12 +502,13 @@ def test_provider_status_reports_locked_until_gate_satisfied(
     monkeypatch.delenv("APIYI_API_KEY", raising=False)
     assert service.provider_status("nano_banana_2")["status"] == "not_configured"
     # Key configured but pricing unknown: locked, never "ready".
+    _force_unknown_pricing(temp_config)
     monkeypatch.setenv("APIYI_API_KEY", "fixture-key")
     locked = service.provider_status("nano_banana_2")
     assert locked["status"] == "locked"
     assert locked["capability"]["pricing_status"] == "unknown"
     # Exact pricing + LIVE=true makes it ready.
-    temp_config.models["models"]["nano_banana_2"]["pricing_status"] = "exact"
+    _force_exact_pricing(temp_config)
     monkeypatch.setenv("LIVE_GENERATION_ENABLED", "true")
     assert service.provider_status("nano_banana_2")["status"] == "ready"
     # Key configured + exact pricing but LIVE=false: still locked.
@@ -692,6 +728,7 @@ def test_web_live_post_is_rejected_by_core_gate_when_pricing_unknown(
 
     from src.web.app import create_app
 
+    _force_unknown_pricing(temp_config)
     monkeypatch.setenv("LIVE_GENERATION_ENABLED", "true")
     monkeypatch.setenv("APIYI_API_KEY", "fixture-key")
     service = StudioService(temp_config)
@@ -722,6 +759,7 @@ def test_cli_live_is_rejected_by_core_gate_when_pricing_unknown(
 
     from src.cli import cli
 
+    _force_unknown_pricing(temp_config)
     monkeypatch.setenv("LIVE_GENERATION_ENABLED", "true")
     monkeypatch.setenv("APIYI_API_KEY", "fixture-key")
     service = StudioService(temp_config)
