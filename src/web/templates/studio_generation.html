@@ -7,7 +7,7 @@
 <p class="muted">Mock generation is offline and visibly watermarked. APIYI Live accepts only one confirmed Shot and never retries automatically.</p>
 <section class="card">
   <h2>APIYI Provider capability</h2>
-  <p><strong>{{ apiyi_status.status }}</strong> · Nano Banana 2 · pricing {{ apiyi_status.capability.pricing_status or 'unknown' }}</p>
+  <p><strong>{{ apiyi_status.status }}</strong> · Nano Banana 2 · pricing {{ apiyi_status.capability.pricing_status or 'unknown' }}{% if apiyi_status.capability.pricing_version %} · {{ apiyi_status.capability.pricing_version }}{% endif %}{% if apiyi_status.capability.pricing_effective_at %} · effective {{ apiyi_status.capability.pricing_effective_at }}{% endif %}</p>
   {% if not apiyi_status.live_enabled %}<p class="muted">Live generation is disabled by LIVE_GENERATION_ENABLED=false. Mock remains available.</p>{% endif %}
   {% if apiyi_status.capability.pricing_status == 'unknown' %}<p class="muted">Live is blocked until a verified versioned price is configured; displayed legacy estimates are not treated as exact prices.</p>{% endif %}
 </section>

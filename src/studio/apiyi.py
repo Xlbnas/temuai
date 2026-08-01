@@ -27,11 +27,58 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from src.core.config import AppConfig
-from src.core.models import ModelConfig
+from src.core.models import ModelConfig, PricingContract
 from src.studio.models import ProviderCapability
 from src.utils.image import detect_image_format_from_bytes
 from src.utils.secrets import mask_message
 from src.utils.size import resolve_image_size
+
+
+def load_pricing_contract(config: AppConfig, model_config: ModelConfig) -> PricingContract | None:
+    """Load and strictly validate the pricing contract for a configured model.
+
+    Returns None when no contract block exists (legacy flat pricing fields).
+    Raises ValueError on any inconsistency; callers must fail closed (treat the
+    model as pricing-unknown) rather than let an invalid contract unlock Live.
+    """
+    raw = config.get_model_config(model_config.name)
+    block = raw.get("pricing_contract")
+    if block is None:
+        return None
+    contract = PricingContract(**block)
+    if contract.provider != "apiyi":
+        raise ValueError("pricing contract provider does not match the Studio APIYI adapter")
+    if contract.provider_model_id != model_config.model:
+        raise ValueError("pricing contract model ID does not match the configured provider model ID")
+    if contract.revoked:
+        raise ValueError("pricing contract has been revoked")
+    if contract.pricing_status == "exact":
+        if contract.request_mode not in {"generation", "edit", "generation_or_edit"}:
+            raise ValueError("pricing contract request mode is not supported by the Studio adapter")
+        if (
+            contract.supported_resolutions
+            and model_config.default_image_size
+            and model_config.default_image_size not in contract.supported_resolutions
+        ):
+            raise ValueError("configured output resolution is outside the pricing contract scope")
+        if (
+            contract.supported_aspect_ratios
+            and model_config.default_aspect_ratio
+            and model_config.default_aspect_ratio not in contract.supported_aspect_ratios
+        ):
+            raise ValueError("configured aspect ratio is outside the pricing contract scope")
+    if contract.expires_at:
+        from datetime import datetime, timezone
+
+        try:
+            expiry = datetime.fromisoformat(contract.expires_at.replace("Z", "+00:00"))
+            if expiry.tzinfo is None:
+                expiry = expiry.replace(tzinfo=timezone.utc)
+        except ValueError as exc:
+            raise ValueError("pricing contract has an unparseable expires_at") from exc
+        if expiry <= datetime.now(timezone.utc):
+            raise ValueError("pricing contract has expired")
+    return contract
 
 
 class APIYIProviderErrorCode(str, Enum):
@@ -305,7 +352,47 @@ class APIYIImageGenerationProvider:
     def capability_for(config: AppConfig, model: str) -> ProviderCapability:
         parsed = _model_config(config, model)
         raw = config.get_model_config(parsed.name)
-        # Existing repository values are estimates, not an APIYI price contract.
+        contract: PricingContract | None = None
+        contract_error: str | None = None
+        try:
+            contract = load_pricing_contract(config, parsed)
+        except ValueError as exc:
+            contract_error = str(exc)
+        exact = contract is not None and contract.pricing_status == "exact"
+        if exact and contract is not None:
+            pricing_status = "exact"
+            pricing_version = contract.pricing_version
+            pricing_source = contract.pricing_source
+            estimated_price = contract.amount
+            pricing_effective_at = contract.effective_at
+            pricing_digest = contract.evidence_digest
+        elif contract_error:
+            # An invalid/expired/revoked contract must fail closed and stay visible.
+            pricing_status = "unknown"
+            pricing_version = None
+            pricing_source = f"invalid pricing contract (locked): {contract_error}"
+            estimated_price = None
+            pricing_effective_at = None
+            pricing_digest = None
+        else:
+            # Legacy flat fields are estimates, not an APIYI price contract.
+            flat_status = raw.get("pricing_status", "unknown")
+            if flat_status == "exact":
+                # A bare pricing_status flip is never sufficient: exact pricing
+                # requires the validated pricing_contract block.
+                pricing_status = "unknown"
+                pricing_version = None
+                pricing_source = "pricing_status=exact requires a validated pricing_contract block (locked)"
+                estimated_price = None
+                pricing_effective_at = None
+                pricing_digest = None
+            else:
+                pricing_status = flat_status
+                pricing_version = raw.get("pricing_version")
+                pricing_source = raw.get("pricing_source", "config/models.yaml estimated_cost_usd (not a verified price contract)")
+                estimated_price = parsed.estimated_cost_usd
+                pricing_effective_at = None
+                pricing_digest = None
         return ProviderCapability(
             provider="apiyi", model=parsed.model,
             supports_image_references=parsed.capabilities.image_edit,
@@ -317,10 +404,12 @@ class APIYIImageGenerationProvider:
             supported_aspect_ratios=list(parsed.size_map.keys()) or ([parsed.default_aspect_ratio] if parsed.default_aspect_ratio else []),
             supported_output_sizes=list(parsed.supported_sizes or parsed.supported_resolutions),
             synchronous=True,
-            pricing_version=raw.get("pricing_version"),
-            estimated_price_usd=parsed.estimated_cost_usd,
-            pricing_status=raw.get("pricing_status", "unknown"),
-            pricing_source=raw.get("pricing_source", "config/models.yaml estimated_cost_usd (not a verified price contract)"),
+            pricing_version=pricing_version,
+            estimated_price_usd=estimated_price,
+            pricing_status=pricing_status,
+            pricing_source=pricing_source,
+            pricing_effective_at=pricing_effective_at,
+            pricing_digest=pricing_digest,
         )
 
     def estimate_cost(self, request: APIYIGenerationRequest) -> float | None:
