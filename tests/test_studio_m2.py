@@ -91,6 +91,37 @@ def test_temu_plan_prompt_reference_isolation_and_mock_e2e(temp_config) -> None:
     assert rejected.status == CandidateStatus.REJECTED
 
 
+def test_temu_prompt_avoids_restricted_compliance_lexicon(temp_config) -> None:
+    service = StudioService(temp_config)
+    project, *_ = _ready_project(service)
+    plan = service.compile_shot_plan(project.id)
+    packages = service.compile_prompt_packages(project.id, plan.id)
+    restricted = {
+        "tactical",
+        "military",
+        "combat",
+        "army",
+        "soldier",
+        "uniform",
+        "gear",
+        "protection",
+        "weapon",
+        "national flag",
+        "rank",
+        "helmet",
+        "battlefield",
+    }
+    for package in packages:
+        compiled = " ".join(
+            [
+                package.rendered_prompt,
+                package.negative_prompt,
+                *package.structured_style_rules,
+            ]
+        ).lower()
+        assert all(term not in compiled for term in restricted)
+
+
 def test_tiktok_plan_stale_and_blocked_requirements(temp_config) -> None:
     service = StudioService(temp_config)
     project, *_ = _ready_project(service, StudioPlatform.TIKTOK_SHOP)

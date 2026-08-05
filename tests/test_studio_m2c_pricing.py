@@ -111,6 +111,7 @@ def test_shipped_nano_banana_2_contract_is_exact_and_valid(temp_config: AppConfi
     assert contract is not None
     assert contract.pricing_status == "exact"
     assert contract.amount == pytest.approx(0.055)
+    assert contract.recommended_hard_max_usd == pytest.approx(0.06)
     assert contract.unit == "per_request"
     assert contract.currency == "USD"
     assert contract.pricing_version == CONTRACT_VERSION
@@ -166,6 +167,13 @@ def test_contract_unsupported_request_mode_fails_closed(temp_config: AppConfig) 
     _set_contract(temp_config, _contract_block(request_mode="batch_offline"))
     capability = APIYIImageGenerationProvider.capability_for(temp_config, "nano_banana_2")
     assert capability.pricing_status == "unknown"
+
+
+def test_contract_hard_max_below_unit_price_fails_closed(temp_config: AppConfig) -> None:
+    _set_contract(temp_config, _contract_block(recommended_hard_max_usd=0.05))
+    capability = APIYIImageGenerationProvider.capability_for(temp_config, "nano_banana_2")
+    assert capability.pricing_status == "unknown"
+    assert "hard max" in (capability.pricing_source or "")
 
 
 def test_expired_or_revoked_contract_fails_closed(temp_config: AppConfig) -> None:
@@ -373,7 +381,7 @@ def test_core_cost_preview_exact_and_unknown(temp_config: AppConfig) -> None:
     assert exact["quantity"] == 1
     assert exact["pricing_version"] == CONTRACT_VERSION
     assert exact["effective_at"] == "2026-03-01"
-    assert exact["hard_max_recommendation"] == pytest.approx(round(0.055 * 1.1, 4))
+    assert exact["hard_max_recommendation"] == pytest.approx(0.06)
     assert exact["reference_price_policy"] == "price_unchanged"
     assert "no provider call" in exact["note"]
     unknown = service.cost_preview(project.id, plan.id, "apiyi", "gpt_image_2_vip", shot_id)

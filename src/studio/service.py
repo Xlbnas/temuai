@@ -87,12 +87,12 @@ IMPORTANCE_RANK = {
 
 def builtin_style_packs() -> list[StylePack]:
     forbidden = [
-        "weapons",
-        "military emblems",
-        "national flags",
-        "ranks",
-        "battlefields",
-        "tactical vests",
+        "dangerous handheld items",
+        "official insignia or badges",
+        "national symbols",
+        "status markings",
+        "conflict scenes",
+        "extra outer vests",
     ]
     preservation = [
         "Preserve exact product construction",
@@ -669,7 +669,11 @@ class StudioService:
                     "effective_at": contract.effective_at,
                     "request_mode": contract.request_mode,
                     "reference_price_policy": contract.reference_policy,
-                    "hard_max_recommendation": round(contract.amount * 1.1, 4) if contract.amount else None,
+                    "hard_max_recommendation": (
+                        contract.recommended_hard_max_usd
+                        if contract.recommended_hard_max_usd is not None
+                        else round(contract.amount * 1.1, 4) if contract.amount else None
+                    ),
                     "pricing_digest": contract.evidence_digest,
                 }
             )

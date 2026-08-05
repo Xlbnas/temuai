@@ -63,6 +63,7 @@ models:
       currency: USD
       unit: per_request
       amount: 0.055
+      recommended_hard_max_usd: 0.06
       request_mode: generation_or_edit
       supported_resolutions: ["512px", "1K", "2K", "4K"]
       supported_aspect_ratios: ["1:1", "1:4", "4:1", "1:8", "8:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"]

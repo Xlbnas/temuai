@@ -106,6 +106,7 @@ class PricingContract(BaseModel):
     currency: str = "USD"
     unit: str | None = None
     amount: float | None = Field(default=None, gt=0)
+    recommended_hard_max_usd: float | None = Field(default=None, gt=0)
     request_mode: str | None = None
     supported_output_sizes: list[str] = Field(default_factory=list)
     supported_resolutions: list[str] = Field(default_factory=list)
@@ -119,6 +120,12 @@ class PricingContract(BaseModel):
 
     @model_validator(mode="after")
     def exact_requires_full_evidence(self) -> PricingContract:
+        if (
+            self.recommended_hard_max_usd is not None
+            and self.amount is not None
+            and self.recommended_hard_max_usd < self.amount
+        ):
+            raise ValueError("recommended hard max must cover the contract amount")
         if self.pricing_status != "exact":
             return self
         missing = [

@@ -194,8 +194,9 @@ def compile_prompt(record: StudioRecord, shot: ShotSpec, pack: StylePack, capabi
     ]
     style_rules = [*pack.product_preservation_rules, *pack.forbidden_elements]
     negative = (
-        "text, logo, watermark, size chart, parameters, weapons, military emblems, national flags, "
-        "ranks, battlefield, combat equipment, added or removed pockets, zippers, cuffs, velcro, seams"
+        "text, logo, watermark, size chart, parameters, official insignia, national symbols, "
+        "status markings, conflict scenes, extra accessories, altered pockets, altered closures, "
+        "altered cuffs, altered seams"
     )
     rendered = "\n".join(
         [
