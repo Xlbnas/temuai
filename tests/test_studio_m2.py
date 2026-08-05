@@ -85,7 +85,7 @@ def test_temu_plan_prompt_reference_isolation_and_mock_e2e(temp_config) -> None:
     record = service.get_record(project.id)
     assert len(record.candidates) == 4
     assert all(service.resolve_candidate_path(project.id, candidate.id).is_file() for candidate in record.candidates)
-    accepted = service.accept_candidate(project.id, record.candidates[0].id)
+    accepted = service.accept_candidate(project.id, record.candidates[0].id, "tester")
     rejected = service.reject_candidate(project.id, record.candidates[1].id, "Wrong styling")
     assert accepted.status == CandidateStatus.ACCEPTED
     assert rejected.status == CandidateStatus.REJECTED

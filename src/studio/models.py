@@ -220,7 +220,7 @@ class StudioRecord(BaseModel):
     """Single atomically-written aggregate per Studio project."""
 
     model_config = ConfigDict(extra="forbid")
-    schema_version: int = 2
+    schema_version: int = 3
     project: StudioProject
     assets: list[Asset] = Field(default_factory=list)
     analyses: list[AssetAnalysis] = Field(default_factory=list)
@@ -230,6 +230,7 @@ class StudioRecord(BaseModel):
     generation_jobs: list[GenerationJob] = Field(default_factory=list)
     generation_attempts: list[GenerationAttempt] = Field(default_factory=list)
     candidates: list[Candidate] = Field(default_factory=list)
+    derived_exports: list[DerivedExport] = Field(default_factory=list)
 
 
 # M2 generation entities intentionally remain in the Studio aggregate.  This
@@ -275,6 +276,7 @@ class ShotSpec(BaseModel):
     required_fact_keys: list[str] = Field(default_factory=list)
     forbidden_elements: list[str] = Field(default_factory=list)
     reference_policy: str = "clean_product_and_detail"
+    scene: str = "standard"
     user_instruction: str = ""
     sequence: int = Field(ge=1)
     enabled: bool = True
@@ -422,5 +424,62 @@ class Candidate(BaseModel):
     status: CandidateStatus = CandidateStatus.GENERATED
     created_at: str = Field(default_factory=utc_now)
     accepted_at: str | None = None
+    accepted_by: str | None = None
+    acceptance_provenance: str | None = None
     rejected_at: str | None = None
     rejection_reason: str | None = None
+
+
+class AcceptanceProvenance(BaseModel):
+    """Human decision metadata; migration timestamps never impersonate a decision time."""
+
+    model_config = ConfigDict(extra="forbid")
+    decision_type: str
+    decided_by: str | None = None
+    decided_at: str | None = None
+    candidate_status_recorded_at: str | None = None
+    imported_at: str | None = None
+    source: str
+
+
+class ExportTransformStep(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    order: int = Field(ge=1)
+    operation: str
+    parameters: dict[str, object] = Field(default_factory=dict)
+
+
+class DerivedExport(BaseModel):
+    """Immutable provenance for a bitmap derived from an immutable provider Candidate."""
+
+    model_config = ConfigDict(extra="forbid")
+    id: str = Field(default_factory=new_id)
+    project_id: str
+    source_candidate_id: str
+    source_candidate_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    source_width: int = Field(gt=0)
+    source_height: int = Field(gt=0)
+    source_mime_type: str
+    generation_attempt_id: str
+    prompt_package_id: str | None = None
+    pricing_version: str | None = None
+    pricing_digest: str | None = None
+    estimated_generation_cost_usd: float | None = Field(default=None, ge=0)
+    actual_cost_usd: float | None = None
+    profile: str
+    pipeline_version: str
+    idempotency_key: str = Field(pattern=r"^[0-9a-f]{64}$")
+    transforms: list[ExportTransformStep] = Field(default_factory=list)
+    stored_path: str
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    width: int = Field(gt=0)
+    height: int = Field(gt=0)
+    mime_type: str
+    image_format: str
+    color_mode: str
+    manifest_path: str
+    manifest_version: str
+    created_at: str = Field(default_factory=utc_now)
+    created_by: str
+    acceptance: AcceptanceProvenance | None = None
+    publishable: bool = False

@@ -416,7 +416,7 @@ async def accept_generation_candidate(
     request: Request, project_id: str, candidate_id: str, csrf_token: str = Form(...), username: str = Depends(get_current_username)
 ) -> RedirectResponse:
     validate_csrf_token(request, csrf_token)
-    _service(request).accept_candidate(project_id, candidate_id)
+    _service(request).accept_candidate(project_id, candidate_id, username)
     return RedirectResponse(f"/studio/{project_id}/generation", status_code=status.HTTP_303_SEE_OTHER)
 
 
@@ -426,6 +426,16 @@ async def reject_generation_candidate(
 ) -> RedirectResponse:
     validate_csrf_token(request, csrf_token)
     _service(request).reject_candidate(project_id, candidate_id, reason)
+    return RedirectResponse(f"/studio/{project_id}/generation", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@router.post("/studio/{project_id}/candidates/{candidate_id}/exports/temu-3x4", response_model=None)
+async def create_temu_derived_export(
+    request: Request, project_id: str, candidate_id: str, csrf_token: str = Form(...), username: str = Depends(get_current_username)
+) -> RedirectResponse:
+    """Create provenance-linked output only; this route cannot accept a Candidate."""
+    validate_csrf_token(request, csrf_token)
+    _service(request).create_derived_export(project_id, candidate_id, actor=username)
     return RedirectResponse(f"/studio/{project_id}/generation", status_code=status.HTTP_303_SEE_OTHER)
 
 
@@ -479,3 +489,18 @@ async def candidate_image(
         )
     except (KeyError, FileNotFoundError):
         raise HTTPException(status_code=404, detail="Studio candidate not found")
+
+
+@router.get("/studio/{project_id}/exports/{export_id}/image")
+async def derived_export_image(
+    request: Request, project_id: str, export_id: str, username: str = Depends(get_current_username)
+) -> FileResponse:
+    try:
+        service = _service(request)
+        record = service.get_record(project_id)
+        export = next((item for item in record.derived_exports if item.id == export_id), None)
+        if export is None:
+            raise KeyError("Derived Export not found")
+        return FileResponse(service.resolve_export_path(project_id, export_id), media_type=export.mime_type)
+    except (KeyError, FileNotFoundError):
+        raise HTTPException(status_code=404, detail="Studio derived export not found")

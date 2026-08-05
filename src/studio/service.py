@@ -25,6 +25,16 @@ from src.studio.apiyi import (
     load_pricing_contract,
     safe_provider_error,
 )
+from src.studio.exports import (
+    EXPORT_MANIFEST_VERSION,
+    PIPELINE_VERSION,
+    atomic_write_json,
+    fit_pad_recipe,
+    image_metadata,
+    manifest_payload,
+    render_fit_pad,
+    sha256_file,
+)
 from src.studio.generation import (
     MockImageGenerationProvider,
     blocking_reasons,
@@ -36,6 +46,7 @@ from src.studio.generation import (
     stable_hash,
 )
 from src.studio.models import (
+    AcceptanceProvenance,
     Asset,
     AssetAnalysis,
     BudgetPolicy,
@@ -43,6 +54,7 @@ from src.studio.models import (
     CandidateStatus,
     CanonicalProductSpec,
     ContentKind,
+    DerivedExport,
     DetailRegion,
     GenerationAttempt,
     GenerationJob,
@@ -1198,17 +1210,21 @@ class StudioService:
                 raise ValueError("Live generation requires explicit provider reconciliation and is not resumable")
         return self.run_generation_job(project_id, job_id)
 
-    def accept_candidate(self, project_id: str, candidate_id: str) -> Candidate:
+    def accept_candidate(self, project_id: str, candidate_id: str, accepted_by: str | None = None) -> Candidate:
+        actor = self._required_text(accepted_by or "", "Human acceptance actor")
         with self.store.lock(project_id):
             record = self.store.load(project_id)
             candidate = self._candidate(record, candidate_id)
             for current in record.candidates:
                 if current.shot_id == candidate.shot_id and current.status == CandidateStatus.ACCEPTED:
                     current.status = CandidateStatus.GENERATED
-                    current.accepted_at = None
+                    current.accepted_at = current.accepted_by = current.acceptance_provenance = None
             candidate.status = CandidateStatus.ACCEPTED
             candidate.accepted_at = utc_now()
+            candidate.accepted_by = actor
+            candidate.acceptance_provenance = "authenticated_human_review"
             candidate.rejected_at = candidate.rejection_reason = None
+            self._refresh_export_publishability(record)
             self.store.save(record)
             return candidate
 
@@ -1231,6 +1247,170 @@ class StudioService:
         if not path.is_file():
             raise FileNotFoundError("Candidate file not found")
         return path
+
+    def create_derived_export(
+        self, project_id: str, candidate_id: str, *, profile: str = "temu_3x4_white_pad_v1", actor: str
+    ) -> DerivedExport:
+        """Create a new bitmap export without changing a Candidate or its review status."""
+        actor = self._required_text(actor, "Export actor")
+        with self.store.lock(project_id):
+            record = self.store.load(project_id)
+            candidate = self._candidate(record, candidate_id)
+            attempt = self._attempt(record, candidate.attempt_id)
+            shot = self._shot_by_id(record, candidate.shot_id)
+            source = self._project_path(project_id, candidate.stored_path)
+            source_hash = sha256_file(source)
+            if source_hash != candidate.sha256:
+                raise ValueError("Candidate bytes no longer match recorded SHA256")
+            transforms, output_relative = self._export_recipe(project_id, candidate, shot, profile)
+            key = stable_hash({"candidate": candidate.id, "source_sha256": source_hash, "profile": profile, "pipeline": PIPELINE_VERSION, "transforms": [item.model_dump(mode="json") for item in transforms], "format": "JPEG"})
+            existing = next((item for item in record.derived_exports if item.idempotency_key == key), None)
+            if existing is not None:
+                self._verify_existing_export(existing)
+                acceptance = self._candidate_acceptance(candidate)
+                if existing.acceptance != acceptance or existing.publishable != (acceptance is not None):
+                    existing.acceptance = acceptance
+                    existing.publishable = acceptance is not None
+                    self._write_export_manifest(record, existing)
+                    record.project.updated_at = utc_now()
+                    self.store.save(record)
+                return existing
+            destination = resolve_within(self.config.output_dir, output_relative)
+            if destination.exists():
+                raise ValueError("Output path already exists without matching provenance")
+            manifest_relative = str(Path(output_relative).with_suffix(".manifest.json"))
+            export = self._new_export(record, candidate, attempt, profile, key, transforms, output_relative, manifest_relative, actor)
+            try:
+                render_fit_pad(source, destination, transforms)
+                if sha256_file(source) != source_hash:
+                    raise ValueError("Candidate source changed during export")
+                metadata = image_metadata(destination)
+                export.sha256 = sha256_file(destination)
+                export.width, export.height = int(metadata["width"]), int(metadata["height"])
+                export.mime_type, export.image_format, export.color_mode = str(metadata["mime_type"]), str(metadata["image_format"]), str(metadata["color_mode"])
+                self._write_export_manifest(record, export)
+                record.derived_exports.append(export)
+                record.project.updated_at = utc_now()
+                self.store.save(record)
+                return export
+            except BaseException:
+                for path in (destination, resolve_within(self.config.output_dir, manifest_relative)):
+                    try:
+                        path.unlink()
+                    except FileNotFoundError:
+                        pass
+                raise
+
+    def backfill_derived_export(
+        self, project_id: str, candidate_id: str, *, output_relative_path: str,
+        profile: str = "temu_3x4_white_pad_v1", actor: str,
+        acceptance_source: str = "migrated_existing_explicit_user_acceptance",
+    ) -> DerivedExport:
+        """Register a verified historical export; it never rewrites its image bytes or invents a decision time."""
+        actor = self._required_text(actor, "Migration actor")
+        if acceptance_source != "migrated_existing_explicit_user_acceptance":
+            raise ValueError("Historical backfill requires explicit migrated user acceptance provenance")
+        with self.store.lock(project_id):
+            record = self.store.load(project_id)
+            candidate = self._candidate(record, candidate_id)
+            if candidate.status != CandidateStatus.ACCEPTED:
+                raise ValueError("Only an accepted Candidate can be backfilled as publishable")
+            attempt = self._attempt(record, candidate.attempt_id)
+            shot = self._shot_by_id(record, candidate.shot_id)
+            source = self._project_path(project_id, candidate.stored_path)
+            source_hash = sha256_file(source)
+            if source_hash != candidate.sha256:
+                raise ValueError("Candidate bytes no longer match recorded SHA256")
+            transforms, _ = self._export_recipe(project_id, candidate, shot, profile)
+            output = resolve_within(self.config.output_dir, output_relative_path)
+            if not output.is_file():
+                raise FileNotFoundError("Historical export file not found")
+            metadata = image_metadata(output)
+            if (metadata["width"], metadata["height"], metadata["mime_type"], metadata["image_format"], metadata["color_mode"]) != (1350, 1800, "image/jpeg", "JPEG", "RGB"):
+                raise ValueError("Historical export does not match the approved profile")
+            key = stable_hash({"candidate": candidate.id, "source_sha256": source_hash, "profile": profile, "pipeline": PIPELINE_VERSION, "transforms": [item.model_dump(mode="json") for item in transforms], "format": "JPEG"})
+            existing = next((item for item in record.derived_exports if item.idempotency_key == key), None)
+            if existing is not None:
+                self._verify_existing_export(existing)
+                return existing
+            manifest_relative = str(Path(output_relative_path).with_suffix(".manifest.json"))
+            export = self._new_export(record, candidate, attempt, profile, key, transforms, output_relative_path, manifest_relative, actor)
+            export.sha256 = sha256_file(output)
+            export.width, export.height = 1350, 1800
+            export.mime_type, export.image_format, export.color_mode = "image/jpeg", "JPEG", "RGB"
+            export.acceptance = AcceptanceProvenance(
+                decision_type="accepted", decided_by="user", decided_at=None,
+                candidate_status_recorded_at=candidate.accepted_at, imported_at=utc_now(), source=acceptance_source,
+            )
+            export.publishable = True
+            self._write_export_manifest(record, export)
+            record.derived_exports.append(export)
+            record.project.updated_at = utc_now()
+            self.store.save(record)
+            return export
+
+    def resolve_export_path(self, project_id: str, export_id: str) -> Path:
+        record = self.store.load(project_id)
+        export = next((item for item in record.derived_exports if item.id == export_id), None)
+        if export is None:
+            raise KeyError("Derived Export not found")
+        path = resolve_within(self.config.output_dir, export.stored_path)
+        if not path.is_file():
+            raise FileNotFoundError("Derived Export file not found")
+        return path
+
+    def _export_recipe(self, project_id: str, candidate: Candidate, shot: ShotSpec, profile: str) -> tuple[list, str]:
+        if profile != "temu_3x4_white_pad_v1":
+            raise ValueError("Unsupported derived export profile")
+        if shot.shot_type != "temu_model_full_front":
+            raise ValueError("TEMU 3:4 export profile is limited to the full-front model Shot")
+        transforms = fit_pad_recipe(candidate.width, candidate.height, 1350, 1800)
+        filename = f"{shot.shot_type}_{candidate.id[:8]}_1350x1800.jpg"
+        return transforms, str(Path("studio_exports") / project_id / filename)
+
+    def _new_export(self, record: StudioRecord, candidate: Candidate, attempt: GenerationAttempt, profile: str, key: str, transforms: list, output_relative: str, manifest_relative: str, actor: str) -> DerivedExport:
+        acceptance = self._candidate_acceptance(candidate)
+        return DerivedExport(
+            project_id=record.project.id, source_candidate_id=candidate.id, source_candidate_sha256=candidate.sha256,
+            source_width=candidate.width, source_height=candidate.height, source_mime_type=candidate.mime_type,
+            generation_attempt_id=attempt.id, prompt_package_id=attempt.prompt_package_id,
+            pricing_version=attempt.pricing_version, pricing_digest=attempt.pricing_digest,
+            estimated_generation_cost_usd=attempt.estimated_cost, actual_cost_usd=None,
+            profile=profile, pipeline_version=PIPELINE_VERSION, idempotency_key=key, transforms=transforms,
+            stored_path=output_relative, sha256="0" * 64, width=1, height=1, mime_type="image/jpeg",
+            image_format="JPEG", color_mode="RGB", manifest_path=manifest_relative,
+            manifest_version=EXPORT_MANIFEST_VERSION, created_by=actor, acceptance=acceptance,
+            publishable=acceptance is not None and candidate.status == CandidateStatus.ACCEPTED,
+        )
+
+    @staticmethod
+    def _candidate_acceptance(candidate: Candidate) -> AcceptanceProvenance | None:
+        if candidate.status != CandidateStatus.ACCEPTED:
+            return None
+        return AcceptanceProvenance(
+            decision_type="accepted", decided_by=candidate.accepted_by, decided_at=candidate.accepted_at,
+            source=candidate.acceptance_provenance or "legacy_candidate_status",
+        )
+
+    def _write_export_manifest(self, record: StudioRecord, export: DerivedExport) -> None:
+        source_shot_type = self._shot_by_id(record, self._candidate(record, export.source_candidate_id).shot_id).shot_type
+        rejected = [
+            {"candidate_id": item.id, "rejection_reason": item.rejection_reason}
+            for item in record.candidates
+            if item.status == CandidateStatus.REJECTED and self._shot_by_id(record, item.shot_id).shot_type == source_shot_type
+        ]
+        atomic_write_json(resolve_within(self.config.output_dir, export.manifest_path), manifest_payload(export, rejected))
+
+    def _verify_existing_export(self, export: DerivedExport) -> None:
+        path = resolve_within(self.config.output_dir, export.stored_path)
+        if not path.is_file() or sha256_file(path) != export.sha256:
+            raise ValueError("Existing derived export fails provenance verification")
+
+    @staticmethod
+    def _refresh_export_publishability(record: StudioRecord) -> None:
+        accepted = {item.id for item in record.candidates if item.status == CandidateStatus.ACCEPTED}
+        for export in record.derived_exports:
+            export.publishable = export.source_candidate_id in accepted and export.acceptance is not None
 
     def _persist_candidate(
         self,

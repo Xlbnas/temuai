@@ -394,9 +394,10 @@ def studio_list_candidates(ctx: click.Context, project_id: str) -> None:
 @studio.command("accept-candidate")
 @click.argument("project_id")
 @click.argument("candidate_id")
+@click.option("--accepted-by", required=True, help="Authenticated human reviewer identity.")
 @click.pass_context
-def studio_accept_candidate(ctx: click.Context, project_id: str, candidate_id: str) -> None:
-    click.echo(StudioService(ctx.obj["config"]).accept_candidate(project_id, candidate_id).status.value)
+def studio_accept_candidate(ctx: click.Context, project_id: str, candidate_id: str, accepted_by: str) -> None:
+    click.echo(StudioService(ctx.obj["config"]).accept_candidate(project_id, candidate_id, accepted_by).status.value)
 
 
 @studio.command("reject-candidate")
@@ -406,6 +407,37 @@ def studio_accept_candidate(ctx: click.Context, project_id: str, candidate_id: s
 @click.pass_context
 def studio_reject_candidate(ctx: click.Context, project_id: str, candidate_id: str, reason: str) -> None:
     click.echo(StudioService(ctx.obj["config"]).reject_candidate(project_id, candidate_id, reason).status.value)
+
+
+@studio.command("create-derived-export")
+@click.argument("project_id")
+@click.argument("candidate_id")
+@click.option("--profile", default="temu_3x4_white_pad_v1", show_default=True)
+@click.option("--actor", required=True, help="Human operator initiating this non-accepting export.")
+@click.pass_context
+def studio_create_derived_export(ctx: click.Context, project_id: str, candidate_id: str, profile: str, actor: str) -> None:
+    export = StudioService(ctx.obj["config"]).create_derived_export(project_id, candidate_id, profile=profile, actor=actor)
+    click.echo(export.model_dump_json(indent=2))
+
+
+@studio.command("backfill-derived-export")
+@click.argument("project_id")
+@click.argument("candidate_id")
+@click.option("--output-relative-path", required=True)
+@click.option("--profile", default="temu_3x4_white_pad_v1", show_default=True)
+@click.option("--actor", required=True, help="Migration operator identity.")
+@click.option(
+    "--acceptance-source", required=True,
+    type=click.Choice(["migrated_existing_explicit_user_acceptance"]),
+    help="Only for a pre-existing, explicitly documented human decision.",
+)
+@click.pass_context
+def studio_backfill_derived_export(ctx: click.Context, project_id: str, candidate_id: str, output_relative_path: str, profile: str, actor: str, acceptance_source: str) -> None:
+    export = StudioService(ctx.obj["config"]).backfill_derived_export(
+        project_id, candidate_id, output_relative_path=output_relative_path, profile=profile,
+        actor=actor, acceptance_source=acceptance_source,
+    )
+    click.echo(export.model_dump_json(indent=2))
 
 
 @cli.group()

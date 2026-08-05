@@ -62,10 +62,20 @@ def default_shots(platform: StudioPlatform, pack: StylePack) -> list[ShotSpec]:
             aspect_ratio=pack.output_aspect_ratio,
             width=width,
             height=height,
-            composition=f"{pack.composition}; {view}",
+            composition=(
+                f"{pack.composition}; {view}; full body from head to soles; both shoes completely visible; "
+                "white margin below feet; body not touching canvas edges"
+                if platform == StudioPlatform.TEMU and shot_type == "temu_model_full_front"
+                else f"{pack.composition}; {view}"
+            ),
             subject_requirements=[view],
             required_fact_keys=["pocket", "zipper"] if "detail" in title.lower() else [],
-            forbidden_elements=list(pack.forbidden_elements),
+            forbidden_elements=(
+                [*pack.forbidden_elements, "cropped feet", "cut-off shoes", "missing shoes", "tight bottom crop", "feet outside frame"]
+                if platform == StudioPlatform.TEMU and shot_type == "temu_model_full_front"
+                else list(pack.forbidden_elements)
+            ),
+            scene=("white_background_full_body_model" if platform == StudioPlatform.TEMU and shot_type == "temu_model_full_front" else "standard"),
             sequence=index,
         )
         for index, (shot_type, title, purpose, view) in enumerate(definitions, 1)
